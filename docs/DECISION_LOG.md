@@ -240,3 +240,312 @@ This document records the architectural and technical decisions made during blue
 | Random seed | Rejected | Different world each run makes bugs hard to reproduce and demos inconsistent. |
 
 **Decision**: Fixed seed, normal world generation.
+
+---
+
+## Decision 15: HTTP API Route Design
+
+**Phase**: 1 (Skeleton)
+
+**Question**: How should the Python Brain specify which tool to execute on the Node.js Body?
+
+**Context**: We need an HTTP API design for Brain-to-Body communication. Two common patterns exist: REST-style (one URL per resource/action) and RPC-style (one endpoint, action in body).
+
+| Option | Considered | Notes |
+|--------|:---------:|-------|
+| RPC-style (`/execute`) | **Chosen** | Single endpoint, tool name in request body. Matches LangChain's tool-calling pattern `{name, args}`. Simpler routing — one handler with a dispatch map. Easier to extend (add tool to registry, not a new route). |
+| REST-style (`/tools/{name}`) | Rejected | One route per tool (6+ routes). Tool name in URL. More explicit, but adds routing boilerplate. Our use case is actions (verbs), not resources (nouns) — RPC is a better semantic fit. |
+
+**Examples**:
+```bash
+# RPC-style (chosen)
+POST /execute
+{"tool": "mine", "params": {"target": "oak_log", "count": 5}}
+
+# REST-style (rejected)
+POST /tools/mine
+{"target": "oak_log", "count": 5}
+```
+
+**Decision**: RPC-style with single `/execute` endpoint.
+
+---
+
+## Decision 16: HTTP Request Format
+
+**Phase**: 1 (Skeleton)
+
+**Question**: How should tool parameters be structured in the request body?
+
+**Context**: The request body needs the tool name and its parameters. Should all fields be at the same level (flat), or should params be nested?
+
+| Option | Considered | Notes |
+|--------|:---------:|-------|
+| Nested params | **Chosen** | Clear separation: `tool` is metadata, `params` are tool-specific. Extensible — can add request-level fields (`timeout`) without collision. Matches LangChain's `{name, args}` structure. `req.body.params` gives exactly what the handler needs. |
+| Flat structure | Rejected | Mixes tool name with parameters. What if a tool needs a param called `tool`? Adding metadata (e.g., `timeout`) creates ambiguity — is it a param or request-level? |
+
+**Examples**:
+```json
+// Nested (chosen)
+{
+  "tool": "mine",
+  "params": {
+    "target": "oak_log",
+    "count": 5
+  }
+}
+
+// Flat (rejected)
+{
+  "tool": "mine",
+  "target": "oak_log",
+  "count": 5
+}
+```
+
+**Decision**: Nested structure with `tool` and `params` as separate fields.
+
+---
+
+## Decision 17: HTTP Response Format
+
+**Phase**: 1 (Skeleton)
+
+**Question**: How detailed should success and error responses be?
+
+**Context**: The LangGraph agent needs response data for decision-making. In Phase 5, the Reflexion node will analyze errors to suggest corrections. The response format affects how well the agent can understand outcomes.
+
+| Option | Considered | Notes |
+|--------|:---------:|-------|
+| Structured responses | **Chosen** | Rich detail: error codes, context, duration. Error codes enable programmatic handling (Reflexion can match `RESOURCE_NOT_FOUND` reliably). Context aids debugging (bot position, search radius). Duration tracking for performance analysis. |
+| Simple responses | Rejected | String errors only. Reflexion would rely on fragile string parsing. Less context for debugging. Sufficient for basic use but limits agent intelligence. |
+
+**Success response format**:
+```json
+{
+  "success": true,
+  "data": {
+    "items_collected": 5,
+    "item_type": "oak_log"
+  },
+  "tool": "mine",
+  "duration_ms": 3420
+}
+```
+
+**Error response format**:
+```json
+{
+  "success": false,
+  "error": {
+    "code": "RESOURCE_NOT_FOUND",
+    "message": "No oak_log found within search radius",
+    "context": {
+      "target": "oak_log",
+      "search_radius": 64,
+      "bot_position": {"x": 100, "y": 64, "z": 100}
+    }
+  },
+  "tool": "mine",
+  "duration_ms": 1250
+}
+```
+
+**Proposed error codes**:
+| Code | When |
+|------|------|
+| `RESOURCE_NOT_FOUND` | Block/entity not found nearby |
+| `PATH_BLOCKED` | Pathfinder can't reach target |
+| `INSUFFICIENT_MATERIALS` | Missing items for craft |
+| `INVENTORY_FULL` | Can't pick up items |
+| `INVALID_PARAMS` | Bad input to tool |
+| `ACTION_FAILED` | Generic action failure |
+| `TIMEOUT` | Action took too long |
+| `BOT_DIED` | Bot died during action |
+| `DISCONNECTED` | Lost connection to server |
+
+**Note**: Actual error context will be adapted based on what Mineflayer provides. Design for ideal, adjust to reality.
+
+**Decision**: Structured responses with error codes and context.
+
+---
+
+## Decision 18: HTTP Status Codes
+
+**Phase**: 1 (Skeleton)
+
+**Question**: What HTTP status code should tool failures return?
+
+**Context**: When a tool fails (e.g., "no oak_log found"), should the HTTP response be 404 Not Found, or 200 OK with error in body? This is about separating HTTP-layer issues from application-layer issues.
+
+| Option | Considered | Notes |
+|--------|:---------:|-------|
+| Always 200 for tool results | **Chosen** | Tool failures are application-level outcomes, not HTTP failures. HTTP 200 = "I received your request and here's my answer." Simpler client logic — just check `success` field. Matches RPC conventions. Reserve HTTP errors for protocol issues. |
+| Semantic HTTP status codes | Rejected | Maps error types to 4xx/5xx. More "correct" HTTP, but our errors aren't HTTP errors. Adds client complexity (handle multiple status codes). Conflates transport and application layers. |
+
+**HTTP errors we still use**:
+| Situation | HTTP Status |
+|-----------|-------------|
+| Valid tool call, any outcome | 200 OK |
+| Malformed JSON in request | 400 Bad Request |
+| Unknown route | 404 Not Found |
+| Server crash (Express error) | 500 Internal Server Error |
+
+**Decision**: Always 200 for tool results. HTTP errors reserved for protocol issues only.
+
+---
+
+## Decision 19: Timeout Handling
+
+**Phase**: 1 (Skeleton)
+
+**Question**: How long should the Brain wait for the Body, and what happens when time runs out?
+
+**Context**: Minecraft actions vary in duration. Mining 64 blocks might take 3 minutes. The timeout strategy affects both reliability and error handling.
+
+### Understanding the Timeout Points
+
+There are two timeout locations:
+
+```
+Brain (Python)                     Body (Node.js)                    Minecraft
+     │                                  │                                │
+     │  ──── HTTP Request ────────────> │                                │
+     │                                  │                                │
+     │        ⏱️ CLIENT TIMEOUT         │     ⏱️ ACTION TIMEOUT          │
+     │   (Python stops waiting)         │  (Our code in Express)         │
+     │                                  │                                │
+```
+
+1. **Client timeout** (Python): How long `requests.post()` waits
+2. **Action timeout** (Express): Our code wrapping Mineflayer calls
+
+**Critical insight**: Mineflayer has no built-in timeout — it waits indefinitely. We must implement action timeouts in Express.
+
+### The Sync Problem
+
+If client times out before action timeout:
+```
+Brain: "Mine 64 logs" ───────────────────────────>  Body
+        │                                            │
+        │  (waiting...)                              │  (mining...)
+        │                                            │
+     3 min: "Timeout! I give up"                     │  (still mining...)
+        │                                            │
+        X  Brain moves on, thinks it failed          │  (still mining...)
+                                                     │
+                                                  5 min: "Done! 64 logs collected"
+                                                     │
+                                                     X  Response goes nowhere
+```
+
+Result: Bot has 64 logs, but Brain doesn't know. State desync.
+
+### Solution: Action Timeout < Client Timeout
+
+```
+Action timeout (Node.js):  4 minutes
+Client timeout (Python):   5 minutes
+```
+
+This ensures:
+1. If action takes too long, **Body** gives up first and returns TIMEOUT error
+2. Brain receives the error and knows what happened
+3. Both sides stay synchronized
+
+### Timeout Flow
+
+```
+Python Brain              Express (our code)              Mineflayer            Minecraft
+     │                          │                             │                     │
+     │  POST /execute           │                             │                     │
+     │ ───────────────────────> │                             │                     │
+     │                          │                             │                     │
+     │                          │  Start timeout timer (4m)   │                     │
+     │                          │  ─────────┐                 │                     │
+     │                          │           │                 │                     │
+     │                          │  Call mineBlocks()          │                     │
+     │                          │ ──────────────────────────> │                     │
+     │                          │                             │  bot actions        │
+     │                          │                             │ ──────────────────> │
+     │                          │                             │                     │
+     │  (waiting, up to 5m)     │  (waiting, up to 4m)       │  (mining...)        │
+     │                          │           │                 │                     │
+     │                          │                             │                     │
+     │                          │  CASE A: Mineflayer done   │                     │
+     │                          │ <────────────────────────── │                     │
+     │                          │  Cancel timer, return OK    │                     │
+     │ <─────────────────────── │                             │                     │
+     │  {success: true, data}   │                             │                     │
+     │                          │                             │                     │
+     │                          │  CASE B: Timer fires first │                     │
+     │                          │ <────────┘                  │                     │
+     │                          │  Cancel Mineflayer, return error                  │
+     │ <─────────────────────── │                             │                     │
+     │  {success: false,        │                             │                     │
+     │   error: {code: TIMEOUT}}│                             │                     │
+```
+
+| Setting | Value | Reasoning |
+|---------|-------|-----------|
+| Default action timeout | 4 minutes | Long enough for big mining jobs |
+| Default client timeout | 5 minutes | 1-minute buffer over action timeout |
+| Per-tool overrides | Deferred | Start simple, tune if issues arise |
+
+**Decision**: 4-minute action timeout (Express), 5-minute client timeout (Python). Global defaults initially, per-tool tuning deferred.
+
+---
+
+## Decision 20: Content-Type Handling
+
+**Phase**: 1 (Skeleton)
+
+**Question**: What content format should the API support, and how strictly should it validate Content-Type headers?
+
+**Context**: The Brain sends JSON to the Body. Should we support other formats? Should we reject requests with wrong/missing Content-Type headers?
+
+### Sub-decision 20a: Format Support
+
+| Option | Considered | Notes |
+|--------|:---------:|-------|
+| JSON only | **Chosen** | Native to JavaScript. LangChain tool calls are JSON. Express has built-in `express.json()`. No need for alternatives. |
+| Multiple formats | Rejected | MessagePack/Protobuf add complexity without benefit. No client needs non-JSON. |
+
+### Sub-decision 20b: Validation Strictness
+
+| Option | Considered | Notes |
+|--------|:---------:|-------|
+| Strict (reject wrong Content-Type) | Rejected | Could reject valid JSON if header missing. Adds friction. |
+| Lenient (parse anyway) | Rejected | Silent failures make debugging harder. |
+| Lenient with logging | **Chosen** | Parse JSON regardless of header, but log warning if Content-Type is unexpected. Works reliably, surfaces misconfigurations. |
+
+**Decision**: JSON only. Lenient parsing with debug logging for unexpected Content-Type.
+
+---
+
+## Decision 21: Authentication & Network Binding
+
+**Phase**: 1 (Skeleton)
+
+**Question**: Should the `/execute` endpoint require authentication? How should network binding be configured?
+
+**Context**: This is a local development project. Brain and Body run on the same machine. Security vs. simplicity trade-off.
+
+| Option | Considered | Notes |
+|--------|:---------:|-------|
+| No auth + bind to 0.0.0.0 | Rejected | Exposes API to network. Anyone who can reach the port controls the bot. |
+| API key required | Rejected | Adds configuration overhead for local-only use. Available as opt-in if needed later. |
+| Localhost binding (configurable) | **Chosen** | Bind to `127.0.0.1` by default — only local processes can connect. Configure via `BOT_HOST` env var for cloud deployment. |
+
+**Implementation**:
+```javascript
+const HOST = process.env.BOT_HOST || '127.0.0.1';
+const PORT = process.env.BOT_PORT || 3000;
+app.listen(PORT, HOST);
+```
+
+**Deployment implications**:
+- Local / single VM: Use defaults (localhost binding)
+- Cloud Run / GKE separate pods: Set `BOT_HOST=0.0.0.0` and add auth middleware
+
+**Decision**: Localhost binding by default (`127.0.0.1`). Configurable via `BOT_HOST` env var for cloud deployment.

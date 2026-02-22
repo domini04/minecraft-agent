@@ -6,6 +6,7 @@
 ### Related Documents
 - **[DECISION_LOG.md](DECISION_LOG.md)** — Reasoning behind each architectural and technical choice
 - **[AGENT_STATE.md](AGENT_STATE.md)** — LangGraph shared state structure with field descriptions
+- **[PHASE1_HTTP_BRIDGE.md](PHASE1_HTTP_BRIDGE.md)** — HTTP API contract between Brain and Body
 
 ---
 
@@ -114,7 +115,7 @@ graph LR
 |-----------|------|
 | **LangGraph Agent** | The decision maker. Breaks goals into steps, selects tools, handles replanning. |
 | **SOP Store** | Library of structured task guides. Tag-based lookup in v1, ChromaDB in v2. |
-| **Express Server** | The translator. Accepts `{ "tool": "mine", "target": "oak_log", "count": 5 }` and runs the corresponding Mineflayer function. |
+| **Express Server** | The translator. Accepts `{ "tool": "mine", "params": { "target": "oak_log", "count": 5 } }` and runs the corresponding Mineflayer function. |
 | **Mineflayer Bot** | The executor. Handles pathfinding, block interaction, inventory management. |
 | **LangSmith** | Workflow monitoring. Full trace of every node execution for debugging. |
 
@@ -136,7 +137,7 @@ graph LR
 **Notes**:
 - `equip` is handled internally by `mine` (equips best tool) and `place_block` (equips the block).
 - `find_block` is absorbed into `mine` (finds automatically) and `get_bot_status` (reports surroundings).
-- Tools return structured JSON responses with `success`, `data`, and `error` fields.
+- Tools return structured JSON responses with `success`, `data`, `error` (with `code`, `message`, `context`), `tool`, and `duration_ms` fields. See [PHASE1_HTTP_BRIDGE.md](PHASE1_HTTP_BRIDGE.md) for full API contract.
 
 ---
 

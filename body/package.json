@@ -1,0 +1,22 @@
+{
+  "name": "minecraft-body",
+  "version": "0.1.0",
+  "description": "Mineflayer-based execution layer for Minecraft agent",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node src/server.js",
+    "test": "jest",
+    "lint": "eslint src/",
+    "lint:fix": "eslint src/ --fix"
+  },
+  "keywords": ["minecraft", "mineflayer", "bot"],
+  "license": "MIT",
+  "dependencies": {
+    "express": "^4.21.0",
+    "mineflayer": "^4.20.1"
+  },
+  "devDependencies": {
+    "jest": "^29.7.0",
+    "supertest": "^7.0.0"
+  }
+}
