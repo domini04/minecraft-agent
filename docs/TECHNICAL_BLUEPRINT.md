@@ -1,12 +1,16 @@
 # Project Blueprint: Autonomous Minecraft Builder Agent
 
 **Version**: 1.0
-**Status**: Clarified & Ready for Implementation
+**Status**: Clarified & Ready for Implementation — API contract extensions: see DECISION_LOG.md Decisions 15–21
 
 ### Related Documents
-- **[DECISION_LOG.md](DECISION_LOG.md)** — Reasoning behind each architectural and technical choice
+- **[DECISION_LOG.md](DECISION_LOG.md)** — Reasoning behind each architectural and technical choice (Decisions 1–21)
 - **[AGENT_STATE.md](AGENT_STATE.md)** — LangGraph shared state structure with field descriptions
-- **[PHASE1_HTTP_BRIDGE.md](PHASE1_HTTP_BRIDGE.md)** — HTTP API contract between Brain and Body
+- **[PHASE1_HTTP_BRIDGE.md](PHASE1_HTTP_BRIDGE.md)** — Phase 1 HTTP bridge overview
+- **[EXECUTE_API_DESIGN.md](EXECUTE_API_DESIGN.md)** — Authoritative design document for the `/execute` endpoint (Decisions 15–21)
+- **[TODO.md](TODO.md)** — Current implementation progress and task tracking
+
+> **Current Implementation Status**: For live progress and which steps are complete or pending, see [docs/TODO.md](TODO.md).
 
 ---
 
@@ -73,18 +77,18 @@
 
 **Design Pattern**: Microservices (Bridge Pattern). Two processes: "Thinking" (Python) and "Doing" (Node.js).
 
-**Communication**: Synchronous HTTP with generous timeouts (~5 minutes). Python sends blocking POST requests to Express; Express responds when the Mineflayer action completes. Upgrade to async polling only if timeout issues arise.
+**Communication**: Synchronous HTTP with layered timeouts (Decision 19): a 4-minute action timeout enforced by Express, and a 5-minute client timeout in the Python Brain. Python sends blocking POST requests to Express; Express responds when the Mineflayer action completes. The action timeout is kept shorter than the client timeout so the Body always responds before the Brain gives up, preventing state desync. Upgrade to async polling only if timeout issues arise.
 
 ### Diagram: System Overview
 
 ```mermaid
 graph LR
     subgraph "User Interface"
-        UI[CLI / Streamlit] -->|"Goal: 'Build House'"| API[FastAPI Server]
+        UI[CLI / Streamlit] -->|"Goal: 'Build House'"| LG
     end
 
     subgraph "The Brain (Python)"
-        API --> LG[LangGraph Agent]
+        LG[LangGraph Agent]
         LG <-->|"Retrieve SOPs"| SOP[(SOP Store\nTag Lookup → ChromaDB)]
     end
 
@@ -137,7 +141,13 @@ graph LR
 **Notes**:
 - `equip` is handled internally by `mine` (equips best tool) and `place_block` (equips the block).
 - `find_block` is absorbed into `mine` (finds automatically) and `get_bot_status` (reports surroundings).
-- Tools return structured JSON responses with `success`, `data`, `error` (with `code`, `message`, `context`), `tool`, and `duration_ms` fields. See [PHASE1_HTTP_BRIDGE.md](PHASE1_HTTP_BRIDGE.md) for full API contract.
+- Tools return structured JSON responses with `success`, `data`, `error` (with `code`, `message`, `context`), `tool`, and `duration_ms` fields. The full API contract is defined in [DECISION_LOG.md](DECISION_LOG.md) (Decisions 15–21) and [EXECUTE_API_DESIGN.md](EXECUTE_API_DESIGN.md).
+
+### Phase 1 HTTP Contract Summary
+
+The Brain-to-Body HTTP bridge (Phase 1, Steps 1.5–1.6) uses an RPC-style single `/execute` endpoint. Tool calls are sent as `POST /execute` with a nested `{tool, params}` body. Responses always return HTTP 200 for tool results (success or failure); HTTP errors are reserved for protocol-level issues only. The server binds to `127.0.0.1` by default (configurable via `BOT_HOST`). Timeouts are split: 4-minute action timeout in Express, 5-minute client timeout in the Python Brain (Decision 19). Content-Type is JSON only, with lenient parsing and debug logging for unexpected headers (Decision 20).
+
+> **Authoritative sources**: [DECISION_LOG.md](DECISION_LOG.md) (Decisions 15–21) and [EXECUTE_API_DESIGN.md](EXECUTE_API_DESIGN.md) are the definitive references for endpoint design, request/response shapes, error codes, and timeout values. The summary above is for orientation only.
 
 ---
 
@@ -269,7 +279,7 @@ After the core pipeline works end-to-end, the tag-based retriever will be swappe
 
 ### Known Failure Scenarios
 
-A living document of failure scenarios will be maintained throughout development. Pre-identified scenarios:
+The table below is the living record of pre-identified failure scenarios. New scenarios will be added to this table as they are discovered during development.
 
 | Error Type | Example | Expected Recovery |
 |------------|---------|-------------------|
@@ -280,21 +290,19 @@ A living document of failure scenarios will be maintained throughout development
 | Action timeout | Tool call exceeded timeout | Retry with same parameters |
 | Unrecoverable | Bot died, server disconnected | Report failure, stop execution |
 
-*New failure scenarios will be documented as they are discovered during development.*
-
 ---
 
 ## 8. Development Roadmap
 
 | Phase | Name | Deliverable | Done When |
 |-------|------|-------------|-----------|
-| 1 | **Skeleton** | Python ↔ Node.js HTTP connection | Python can call `/status` and get bot health/position back |
-| 2 | **Core Tools** | All 6 composite tools in Node.js | Each tool works when called manually via cURL |
-| 3 | **Brain v1** | LangGraph with Planner + Executor nodes | Agent executes single-step command: "Go to 100,64,100 and chat hello" |
-| 4 | **Knowledge** | SOP tag lookup + Guide Retriever node | Agent executes multi-step chain: "Get me a stone pickaxe" |
-| 5 | **Resilience** | Reflexion node + retry logic + error docs | Agent recovers from common failures (no trees nearby, path blocked) |
-| 6 | **Construction** *(stretch)* | `place_block` integration + building from SOP | Agent builds a simple structure from an SOP |
-| 7 | **Polish** *(stretch)* | Streamlit UI, ChromaDB, documentation | Portfolio-ready presentation layer |
+| 1 | **Skeleton** | Python ↔ Node.js HTTP connection | `curl -X POST http://127.0.0.1:3000/execute -d '{"tool":"get_bot_status","params":{}}' -H "Content-Type: application/json"` returns `{"success":true,...}` with live bot position; `npm test` in `body/` passes |
+| 2 | **Core Tools** | All 6 composite tools in Node.js | `curl` calls to `/execute` for each of the 6 tools (`mine`, `craft`, `place_block`, `navigate`, `get_bot_status`, `chat`) return `{"success":true,...}`; `npm test` in `body/` passes for all tool handlers |
+| 3 | **Brain v1** | LangGraph with Planner + Executor nodes | Running `brain/src/main.py` with goal "Go to 100,64,100 and chat hello" results in bot navigating to coordinates and sending chat; `pytest` in `brain/` passes |
+| 4 | **Knowledge** | SOP tag lookup + Guide Retriever node | Running `brain/src/main.py` with goal "Get me a stone pickaxe" results in agent completing the full crafting chain end-to-end; `pytest` in `brain/` passes |
+| 5 | **Resilience** | Reflexion node + retry logic | Running `brain/src/main.py` in a scenario with no trees nearby results in the Reflexion node logging a recovery action and retrying; failure scenarios table in §7 is updated with at least 3 cases observed in practice; `pytest` in `brain/` passes |
+| 6 | **Construction** *(stretch)* | `place_block` integration + building from SOP | Running `brain/src/main.py` with a construction SOP results in bot placing blocks at correct coordinates to match the SOP layout; `npm test` and `pytest` both pass |
+| 7 | **Polish** *(stretch)* | Streamlit UI, ChromaDB | Streamlit app (`brain/src/ui.py`) launches and accepts goals; ChromaDB retriever returns correct SOP for fuzzy queries; `pytest` in `brain/` passes |
 
 ---
 
