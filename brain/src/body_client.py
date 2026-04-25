@@ -13,4 +13,11 @@ class BodyClient:
         return response.json()
 
     def execute(self, tool, params=None):
-        raise NotImplementedError  # Step 1.5
+        payload = {"tool": tool, "params": params if params is not None else {}}
+        response = requests.post(
+            f"{self.base_url}/execute",
+            json=payload,
+            timeout=300,
+        )
+        response.raise_for_status()
+        return response.json()
