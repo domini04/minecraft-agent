@@ -2,6 +2,7 @@
 // Creates and configures the Minecraft bot connection
 
 const mineflayer = require('mineflayer');
+const { pathfinder, Movements } = require('mineflayer-pathfinder');
 
 // Configuration from environment variables
 const config = {
@@ -28,11 +29,19 @@ function createBot(overrides = {}) {
     username: botConfig.username,
   });
 
+  // Load pathfinder plugin before any event handlers (D2)
+  bot.loadPlugin(pathfinder);
+
   // Event: Bot spawned in world
   bot.once('spawn', () => {
     console.log('[Bot] Spawned in world');
     console.log(`[Bot] Position: ${bot.entity.position}`);
     console.log(`[Bot] Health: ${bot.health}, Food: ${bot.food}`);
+
+    // Configure default movements for pathfinder (D3)
+    const movements = new Movements(bot);
+    bot.pathfinder.setMovements(movements);
+    console.log('[Bot] Pathfinder default Movements configured');
   });
 
   // Event: Bot disconnected

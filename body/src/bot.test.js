@@ -11,6 +11,7 @@ describe('Bot module', () => {
       once: jest.fn(),
       on: jest.fn(),
       quit: jest.fn(),
+      loadPlugin: jest.fn(),
       entity: { position: { x: 0, y: 64, z: 0 } },
       health: 20,
       food: 20,
