@@ -62,6 +62,47 @@ function getBot() {
 }
 
 /**
+ * Gets structured bot status for the /status endpoint
+ * @returns {Object|null} Bot status object or null if bot not connected
+ */
+function getBotStatus() {
+  if (!bot || !bot.entity) {
+    return null;
+  }
+
+  const pos = bot.entity.position;
+
+  // Build inventory list from bot.inventory.items()
+  const inventory = bot.inventory
+    ? bot.inventory.items().map((item) => ({
+        name: item.name,
+        count: item.count,
+      }))
+    : [];
+
+  // Get nearby entities (excluding the bot itself)
+  const nearbyEntities = Object.values(bot.entities)
+    .filter((e) => e !== bot.entity && e.position.distanceTo(bot.entity.position) < 16)
+    .map((e) => ({
+      name: e.username || e.displayName || e.name || 'unknown',
+      type: e.type,
+      distance: Math.round(e.position.distanceTo(bot.entity.position) * 10) / 10,
+    }));
+
+  return {
+    health: bot.health,
+    food: bot.food,
+    position: {
+      x: Math.round(pos.x * 10) / 10,
+      y: Math.round(pos.y * 10) / 10,
+      z: Math.round(pos.z * 10) / 10,
+    },
+    inventory,
+    nearby_entities: nearbyEntities,
+  };
+}
+
+/**
  * Disconnects the bot gracefully
  */
 function disconnectBot() {
@@ -88,6 +129,7 @@ if (!process.env.JEST_WORKER_ID) {
 module.exports = {
   createBot,
   getBot,
+  getBotStatus,
   disconnectBot,
   config,
 };
