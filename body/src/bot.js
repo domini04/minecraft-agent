@@ -3,6 +3,7 @@
 
 const mineflayer = require('mineflayer');
 const { pathfinder, Movements } = require('mineflayer-pathfinder');
+const collectBlock = require('mineflayer-collectblock');
 
 // Configuration from environment variables
 const config = {
@@ -29,8 +30,9 @@ function createBot(overrides = {}) {
     username: botConfig.username,
   });
 
-  // Load pathfinder plugin before any event handlers (D2)
+  // Load plugins before any event handlers (D2/D3)
   bot.loadPlugin(pathfinder);
+  bot.loadPlugin(collectBlock.plugin);
 
   // Event: Bot spawned in world
   bot.once('spawn', () => {
