@@ -16,7 +16,8 @@ describe('navigate tool', () => {
 
     expect(mockBot.pathfinder.goto).toHaveBeenCalledTimes(1);
     const goalArg = mockBot.pathfinder.goto.mock.calls[0][0];
-    expect(goalArg).toBeInstanceOf(goals.GoalBlock);
+    expect(goalArg).toBeInstanceOf(goals.GoalNear);
+    expect(goalArg.rangeSq).toBe(1);
     expect(goalArg.x).toBe(10);
     expect(goalArg.y).toBe(64);
     expect(goalArg.z).toBe(20);
@@ -30,7 +31,8 @@ describe('navigate tool', () => {
     const result = await navigate({ x: 10.7, y: 64.2, z: 20.5 }, mockBot);
 
     const goalArg = mockBot.pathfinder.goto.mock.calls[0][0];
-    expect(goalArg).toBeInstanceOf(goals.GoalBlock);
+    expect(goalArg).toBeInstanceOf(goals.GoalNear);
+    expect(goalArg.rangeSq).toBe(1);
     expect(goalArg.x).toBe(11);
     expect(goalArg.y).toBe(64);
     expect(goalArg.z).toBe(21);
@@ -43,7 +45,8 @@ describe('navigate tool', () => {
     const result = await navigate({ x: -50, y: 5, z: -100 }, mockBot);
 
     const goalArg = mockBot.pathfinder.goto.mock.calls[0][0];
-    expect(goalArg).toBeInstanceOf(goals.GoalBlock);
+    expect(goalArg).toBeInstanceOf(goals.GoalNear);
+    expect(goalArg.rangeSq).toBe(1);
     expect(goalArg.x).toBe(-50);
     expect(goalArg.y).toBe(5);
     expect(goalArg.z).toBe(-100);
@@ -83,5 +86,41 @@ describe('navigate tool', () => {
     mockBot.pathfinder.goto.mockRejectedValueOnce(new Error('NoPath'));
     await expect(navigate({ x: 10, y: 64, z: 20 }, mockBot))
       .rejects.toThrow(/navigate: pathfinding failed: NoPath/);
+  });
+
+  describe('T9: thinkTimeout save-and-restore', () => {
+    it('T9a: success path — sets thinkTimeout during goto, restores prior value after', async () => {
+      mockBot.pathfinder.thinkTimeout = 5000;
+
+      let capturedDuringGoto;
+      mockBot.pathfinder.goto.mockImplementation(async () => {
+        capturedDuringGoto = mockBot.pathfinder.thinkTimeout;
+      });
+
+      await navigate({ x: 10, y: 64, z: 20 }, mockBot);
+
+      // During goto, thinkTimeout must be the navigate budget (20000 ms by default)
+      expect(capturedDuringGoto).toBe(20000);
+      // After goto resolves, thinkTimeout must be restored to the prior value
+      expect(mockBot.pathfinder.thinkTimeout).toBe(5000);
+    });
+
+    it('T9b: failure path — restores thinkTimeout even when goto rejects', async () => {
+      mockBot.pathfinder.thinkTimeout = 5000;
+
+      let capturedDuringGoto;
+      mockBot.pathfinder.goto.mockImplementation(async () => {
+        capturedDuringGoto = mockBot.pathfinder.thinkTimeout;
+        throw new Error('Took to long to decide path to goal!');
+      });
+
+      await expect(navigate({ x: 10, y: 64, z: 20 }, mockBot))
+        .rejects.toThrow(/navigate: pathfinding failed/);
+
+      // During goto, thinkTimeout must be the navigate budget
+      expect(capturedDuringGoto).toBe(20000);
+      // After goto rejects, thinkTimeout must still be restored
+      expect(mockBot.pathfinder.thinkTimeout).toBe(5000);
+    });
   });
 });
