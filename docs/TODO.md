@@ -1,59 +1,94 @@
 # Current Session Progress
 
-**Last Updated**: 2026-04-26
-**Current Phase**: Phase 1 — Skeleton (HTTP Bridge) → wrapping up; Phase 2 next
-**Current Stage**: Phase 1 complete pending Step 1.5 brain-side `execute()` call
+**Last Updated**: 2026-05-02
+**Current Phase**: Phase 1 ✅ + Phase 2 ✅ complete; Phase 3 next
+**Current Stage**: Phase 2 acceptance gate (live smoke 6/6) PASSED at run 7
 
 ---
 
-## Completed
+## Completed Phases
 
-- [x] Step 0.4: Project scaffolding (folder structure, package.json, pyproject.toml, .gitignore, linting)
-- [x] Phase 1 Stage 1: Understand — `PHASE1_HTTP_BRIDGE.md`
-- [x] Phase 1 Stage 2: Design — API Contract (Decisions 15–21)
-- [x] Phase 1 Stage 3: Implementation
-  - [x] Step 1.1: Express server with `GET /status` health-check (`34d34fc`)
-  - [x] Step 1.2: Mineflayer bot connection (`34d34fc`)
-  - [x] Step 1.3: Wire bot to Express — `/status` returns live bot data (committed in `c31ee20`)
-  - [x] Step 1.4: Python `BodyClient.get_status()` with pytest coverage (`ddbe601`)
-  - [x] Step 1.5 (Body side): `POST /execute` scaffold with 6-tool dispatch, validation, timeout, error middleware (committed in `c31ee20`)
-  - [x] Step 1.6: Unit tests — 14 cases in `app.test.js` (committed in `c31ee20`); 8 cases in `test_body_client.py` (`ddbe601`)
+### Phase 1 — Skeleton (HTTP Bridge) ✅
 
-## Auxiliary commits this round
-- `854693c` PGE-reviewed blueprint alignment with Decisions 15–21
-- `062dcd3` `.gitignore` for PGE harness sessions
-- `f303e4a` Doc restructure: LEDGER index, `EXECUTE_API_DESIGN.md`, root `CLAUDE.md`
+- Step 0.4: Project scaffolding
+- Step 1.1: Express server (`34d34fc`)
+- Step 1.2: Mineflayer bot connection (`34d34fc`)
+- Step 1.3: `/status` returns live bot data (`c31ee20`)
+- Step 1.4: `BodyClient.get_status()` (`ddbe601`)
+- Step 1.5 body: `POST /execute` dispatcher (`c31ee20`)
+- Step 1.5 brain: `BodyClient.execute()` (`79e3299`)
+- Step 1.6: Unit tests (jest + pytest)
+
+### Phase 2 — Core Tools ✅
+
+All six composite tools implemented + verified on live MC server:
+
+| Tool | Commit | Unit tests | Notes |
+|------|--------|------------|-------|
+| chat | `4f9455e` | 6 | Trivial |
+| get_bot_status | `7babf7d` | 7 | Strategy A (param bot, not module state) |
+| navigate | `b9570e8` + `8839db1` | 9+2 | Pathfinder; GoalNear(1) + 20s thinkTimeout |
+| mine | `bf376ba` + `9eb524b` | 24+3 | collectblock + post-collect inventory verify |
+| craft | `7cea36d` | 25 | Option (c): Brain provides `crafting_table_pos` |
+| place_block | `6985dfe` + `e503698` | 15+3 | post-place world-state verify (Sprint 9) |
+
+Plus infra: pathfinder (`07971d9`), collectblock (`4dd0ead`).
+
+### Smoke Test Harness ✅
+
+- Sprint 7: harness scaffolding (`640ca01`)
+- Sprint 8: scenario hardening (`19d878b`)
+- Sprints 12–14: live-run scenario tweaks (`1f02113`, `cba5d4b`, `4e378c9`)
+
+`npm run test:smoke` from `body/`: full lifecycle automation (MC server start → body server → 6 scenarios → cleanup) with deterministic world reset.
 
 ---
 
-## Remaining Phase 1 work
+## Live Smoke Results — Run 7 (final)
 
-| Step | Task | Status |
-|------|------|--------|
-| 1.5b | `BodyClient.execute(tool, params)` — POST `/execute` with 5-min client timeout (Decision 19) | Not started |
-| 1.5c | End-to-end smoke test: `BodyClient.execute("chat", {message: "hi"})` returns `ACTION_FAILED` (NOT_IMPLEMENTED) | Not started |
+```
+| chat                 | PASS   |       3ms |
+| get_bot_status       | PASS   |       6ms |
+| navigate             | PASS   |   42327ms |
+| place_block          | PASS   |    2784ms |
+| mine                 | PASS   |    2083ms |
+| craft                | PASS   |    2016ms |
+```
 
-`BodyClient.execute()` is currently `raise NotImplementedError`. Wiring it to the live `/execute` endpoint and verifying round-trip against the running Body server closes Phase 1 fully.
+**Three live-only defects discovered + fixed in this iteration loop:**
+1. `place_block` returned success without verifying world state → server-revert detection added.
+2. `mine` returned success without verifying inventory growth → post-collect verify added.
+3. `navigate` used GoalBlock + default 5s thinkTimeout → switched to GoalNear(1) + 20s.
+
+These are exactly the kind of bugs unit tests with mocks cannot catch. Live smoke + retrospective iteration was the right pattern.
+
+---
+
+## Test Counts
+
+- **119 unit tests** passing (jest 8 suites + pytest)
+- **6 live smoke scenarios** passing (deterministic, automated)
 
 ---
 
 ## Resume Point
 
-**Where we left off**: Phase 1 effectively complete except `BodyClient.execute()` body. All committed work passes tests (25 jest, 8 pytest).
+Phase 2 complete and verified. Next: **Phase 3 — Brain v1 (Planner + Executor on LangGraph).**
 
-**Minecraft server setup**: at `~/minecraft-server` (Java 21, MC 1.20.4, offline mode).
-
-**To resume**:
-1. Start Minecraft server: `cd ~/minecraft-server && ./start.sh` (only needed for true E2E; mocked tests don't require it)
-2. Next sprint: implement `BodyClient.execute()` — RPC call with 5-min client timeout, returns parsed JSON, raises on transport errors.
+Phase 3 work involves:
+- Add LangGraph + LangChain to `brain/pyproject.toml`
+- Implement Planner node: prompts the LLM with goal + bot state, returns next tool call
+- Implement Executor node: dispatches the tool via `BodyClient.execute()`, captures result
+- Implement state schema (matches `docs/AGENT_STATE.md`)
+- LLM provider: Gemini 3 Flash (model-agnostic via LangChain)
+- Single-step proof: agent goal "navigate to 100,64,100 then chat hello" succeeds
 
 ---
 
 ## Phases ahead
 
-2. Core Tools (6 composite tools — implement bodies, replace `NOT_IMPLEMENTED` stubs)
 3. Brain v1 (Planner + Executor on LangGraph)
 4. Knowledge (SOP + Guide Retriever)
 5. Resilience (Reflexion + retries)
-6. Construction (stretch — `place_block`)
-7. Polish (stretch — Streamlit, ChromaDB)
+6. Construction (stretch)
+7. Polish (Streamlit, ChromaDB)
