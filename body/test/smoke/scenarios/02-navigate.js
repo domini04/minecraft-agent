@@ -28,7 +28,14 @@ module.exports = {
       throw new Error(`navigate: expected data.reached === true, got ${env.data.reached}`);
     }
 
-    assertPositionNear(env.data.position, target, 1.5);
+    // Tolerance is 2.0 to accommodate pathfinder's GoalBlock(x,y,z) semantics:
+    // the bot stands ON the goal block, so its feet are at y+1 relative to the
+    // target coordinate. Combined with pathfinder's typical corner-cell finish,
+    // the observed Euclidean distance from a successful navigate to the target
+    // floor coordinate can reach √3 ≈ 1.73 (one block off in each axis). 2.0
+    // keeps the assertion strict enough to catch real failures while permitting
+    // the inherent y+1 standing offset.
+    assertPositionNear(env.data.position, target, 2.0);
 
     return env;
   },

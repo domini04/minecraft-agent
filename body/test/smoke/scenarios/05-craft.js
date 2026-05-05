@@ -1,19 +1,24 @@
 // T6 — craft scenario
 // Clears inventory, gives 4 oak_planks, crafts a crafting_table, and verifies result.
+// prepareWorkArea is called first so the bot is in a known-safe air pocket
+// rather than potentially inside terracotta or other terrain blocks.
 
 const { assertEnvelope } = require('../assertions');
-
-const SETTLE_MS = 1000;
+const { prepareWorkArea, SETTLE_MS } = require('./_helpers');
 
 module.exports = {
   name: 'craft',
 
   async setup(ctx) {
-    // Clear everything then give 4 oak_planks
+    // Teleport the bot to a clean work area before issuing inventory commands.
+    // This prevents the bot from being suffocated inside terrain on non-flat seeds.
+    await prepareWorkArea(ctx.client, ctx.spawn);
+
+    // Clear everything then give 4 oak_planks.
     await ctx.client.execute('chat', { message: '/clear @s' });
     await ctx.client.execute('chat', { message: '/give @s oak_planks 4' });
 
-    // Wait for the give to resolve server-side
+    // Wait for the give to resolve server-side.
     await new Promise((resolve) => setTimeout(resolve, SETTLE_MS));
   },
 
@@ -36,7 +41,7 @@ module.exports = {
   },
 
   async teardown(ctx) {
-    // Best-effort clear crafting_table from inventory
+    // Best-effort clear crafting_table from inventory.
     try {
       await ctx.client.execute('chat', { message: '/clear @s crafting_table' });
     } catch (err) {
