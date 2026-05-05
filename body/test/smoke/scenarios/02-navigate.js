@@ -28,14 +28,12 @@ module.exports = {
       throw new Error(`navigate: expected data.reached === true, got ${env.data.reached}`);
     }
 
-    // Tolerance is 2.0 to accommodate pathfinder's GoalBlock(x,y,z) semantics:
-    // the bot stands ON the goal block, so its feet are at y+1 relative to the
-    // target coordinate. Combined with pathfinder's typical corner-cell finish,
-    // the observed Euclidean distance from a successful navigate to the target
-    // floor coordinate can reach √3 ≈ 1.73 (one block off in each axis). 2.0
-    // keeps the assertion strict enough to catch real failures while permitting
-    // the inherent y+1 standing offset.
-    assertPositionNear(env.data.position, target, 2.0);
+    // Tolerance is 2.5 to accommodate Sprint 11's GoalNear(x,y,z,1) semantics:
+    // the bot stops within 1 block of the goal, AND its feet land at y+1 because
+    // it must stand on top of a solid block. Worst-case Euclidean distance is
+    // √(1² + 2² + 1²) = √6 ≈ 2.45 (range=1 in x/z plus y+1 standing offset).
+    // 2.5 covers the GoalNear corner case observed in run-6 (2.24 blocks).
+    assertPositionNear(env.data.position, target, 2.5);
 
     return env;
   },

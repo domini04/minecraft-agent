@@ -50,13 +50,7 @@ module.exports = {
     return env;
   },
 
-  async teardown(ctx) {
-    // Best-effort mine the placed dirt so subsequent runs don't collide.
-    // (T5 will normally do this, but teardown protects against T5 being skipped.)
-    try {
-      await ctx.client.execute('mine', { target: 'dirt', count: 1, max_distance: 16 });
-    } catch (err) {
-      console.warn(`[03-place-block] teardown: failed to mine dirt: ${err.message}`);
-    }
-  },
+  // No teardown: T05 (mine) consumes the dirt block this scenario placed.
+  // A teardown that mines here would race with T05's setup and break it.
+  // World reset at the start of every test:smoke run handles cleanup if T05 is skipped.
 };
