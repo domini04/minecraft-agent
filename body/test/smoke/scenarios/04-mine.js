@@ -28,13 +28,14 @@ module.exports = {
   },
 
   async run(ctx) {
-    // max_distance: 4 — the placed dirt is 1 block laterally from the bot's standing
-    // position, so it will always be within 4. The tight radius prevents findBlock from
-    // matching any natural dirt that may exist further away in the world.
+    // max_distance: 16 — the placed dirt is 1 block laterally from the bot's standing
+    // position. The work area sits at floor.y = spawn.y + 10 (a sky pocket above terrain),
+    // so there is no natural dirt at this altitude to confuse with. We use a generous radius
+    // to absorb any chunk-cache or position-rounding drift between place_block and mine.
     const env = await ctx.client.execute('mine', {
       target: 'dirt',
       count: 1,
-      max_distance: 4,
+      max_distance: 16,
     });
 
     assertEnvelope(env, { tool: 'mine', success: true });
