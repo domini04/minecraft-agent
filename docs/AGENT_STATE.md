@@ -176,3 +176,4 @@ Final output message displayed to the user upon task completion or failure.
 | Date | Change | Reason |
 |------|--------|--------|
 | Initial | Created with 9 fields | Blueprint clarification session |
+| 2026-05-05 | Phase-3 subset landed in `brain/src/state.py` (`goal`, `plan`, `current_step`, `step_results`, `bot_status`, `iteration_count`, `result`); fields `guide`, `retry_count`, `errors` deferred to Phases 4–5. | Sprint 3b — single-step Planner+Executor scope. |
