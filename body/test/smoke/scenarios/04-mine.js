@@ -1,28 +1,19 @@
 // T5 — mine scenario
 // Depends on T4 (place_block) having placed a dirt block at the work-area target.
-// Uses the PURE coord helper (computeWorkAreaCoords) rather than prepareWorkArea so
-// we do NOT re-setblock the target cell to air — that would destroy the dirt T4 left.
-// Only a single /tp is issued to return the bot to the standing position.
+// Bot is naturally at the work area after T4's place_block + Sprint 9 verify, so
+// we DO NOT issue a /tp here — empirically /tp can trigger chunk-state churn that
+// makes findBlock miss the freshly-placed dirt. We rely on the bot's natural
+// post-place position and a generous max_distance for findBlock instead.
 
 const { assertEnvelope, assertInventoryDelta } = require('../assertions');
-const { computeWorkAreaCoords, SETTLE_MS } = require('./_helpers');
 
 module.exports = {
   name: 'mine',
 
   async setup(ctx) {
-    // Recompute the same work-area coords T4 used — pure, no server commands.
-    const { standing } = computeWorkAreaCoords(ctx.spawn);
-
-    // Re-tp the bot to the standing position in case it drifted during T4's place_block.
-    // We do NOT call prepareWorkArea here because that would /setblock the target to air,
-    // destroying the dirt block that T4 placed and that we are about to mine.
-    await ctx.client.execute('chat', {
-      message: `/tp @s ${standing.x} ${standing.y} ${standing.z}`,
-    });
-    await new Promise((resolve) => setTimeout(resolve, SETTLE_MS));
-
-    // Capture inventory before mining.
+    // Capture inventory before mining. The bot is already at the work area from T4.
+    // No /tp, no setblock — anything we do here risks evicting the dirt block from
+    // the bot's local chunk cache.
     const statusEnv = await ctx.client.execute('get_bot_status', {});
     ctx._mineBeforeInv = statusEnv.data.inventory;
   },
