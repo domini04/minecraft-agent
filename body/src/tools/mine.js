@@ -7,6 +7,23 @@ const DEFAULT_MAX_DISTANCE = 32;
 const MAX_DISTANCE_CAP = 128;
 
 /**
+ * Returns how many milliseconds to wait after bot.collectBlock.collect resolves
+ * before re-reading inventory to verify the item was actually picked up.
+ *
+ * Resolution order:
+ *   1. MINE_VERIFY_SETTLE_MS env var (explicit override for tuning in production)
+ *   2. JEST_WORKER_ID present → 0 ms (avoid 200ms × N dead time in jest)
+ *   3. Default 200 ms (sufficient budget for pickup packet round-trip on localhost)
+ */
+function getSettleMs() {
+  if (process.env.MINE_VERIFY_SETTLE_MS !== undefined) {
+    return Number(process.env.MINE_VERIFY_SETTLE_MS);
+  }
+  if (process.env.JEST_WORKER_ID !== undefined) return 0;
+  return 200;
+}
+
+/**
  * Mines `count` blocks of `target` type within `max_distance` blocks of the bot.
  * Uses mineflayer-collectblock to navigate, mine, and collect each block.
  *
@@ -67,6 +84,18 @@ async function mine(params, bot) {
   let collected = 0;
   let last_position = null;
 
+  // Helper: count how many of `target` are currently in inventory.
+  // NOTE: Assumes target block name === item name. This holds for the MVP block
+  // list (dirt, oak_log, stone, cobblestone). Blocks whose drops differ from
+  // their name (e.g. coal_ore → coal) are deferred to a future drop-table sprint.
+  const countTarget = () =>
+    bot.inventory.items()
+      .filter(it => it.name === target)
+      .reduce((sum, it) => sum + it.count, 0);
+
+  // Capture inventory baseline before loop starts (D6).
+  let baseline = countTarget();
+
   for (let i = 0; i < count; i++) {
     const block = bot.findBlock({ matching: [blockId], maxDistance });
 
@@ -81,6 +110,19 @@ async function mine(params, bot) {
     } catch (err) {
       throw new Error(`mine: collect failed: ${err.message}`);
     }
+
+    // --- Post-collect inventory verification (Sprint 10) ---
+    // bot.collectBlock.collect resolves on dig completion, not confirmed pickup.
+    // Wait briefly then verify inventory actually grew for this target item.
+    await new Promise(r => setTimeout(r, getSettleMs()));
+    const current = countTarget();
+    if (current <= baseline) {
+      throw new Error(
+        `mine: collect resolved but inventory did not increase for "${target}" ` +
+        `(collected ${i} of ${count} dug-and-resolved; possible pickup race)`
+      );
+    }
+    baseline = current;
 
     collected = i + 1;
 

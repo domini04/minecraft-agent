@@ -4,12 +4,23 @@ describe('mine tool', () => {
   const mockBlock = (name = 'oak_log', pos = { x: 5, y: 64, z: 5 }) =>
     ({ name, position: pos });
 
-  const makeMockBot = () => ({
-    registry: { blocksByName: { oak_log: { id: 17, name: 'oak_log' } } },
-    findBlock: jest.fn(),
-    collectBlock: { collect: jest.fn().mockResolvedValue(undefined) },
-    entity: { position: { x: 5, y: 64, z: 5 } },
-  });
+  const makeMockBot = () => {
+    let targetCount = 0;
+    const bot = {
+      registry: { blocksByName: { oak_log: { id: 17, name: 'oak_log' } } },
+      findBlock: jest.fn(),
+      collectBlock: {
+        collect: jest.fn().mockImplementation(async () => { targetCount += 1; }),
+      },
+      inventory: {
+        items: jest.fn(() => Array(targetCount).fill({ name: 'oak_log', count: 1 })),
+      },
+      entity: { position: { x: 5, y: 64, z: 5 } },
+    };
+    // Expose counter mutator for tests that override collect.mockImplementation
+    bot._bumpTarget = () => { targetCount += 1; };
+    return bot;
+  };
 
   // T1: Happy path — mines 1 block, returns correct shape
   it('T1: mines 1 block and returns correct result shape', async () => {
@@ -39,6 +50,7 @@ describe('mine tool', () => {
     let callCount = 0;
     mockBot.collectBlock.collect.mockImplementation(async () => {
       callCount += 1;
+      mockBot._bumpTarget();
       mockBot.entity.position = { x: callCount, y: 64, z: callCount };
     });
 
@@ -217,5 +229,64 @@ describe('mine tool', () => {
     await mine({ target: 'oak_log', count: 1, max_distance: 64 }, mockBot);
 
     expect(mockBot.findBlock.mock.calls[0][0].maxDistance).toBe(64);
+  });
+
+  // T11: Happy path with inventory verification active — collect succeeds and inventory grows
+  it('T11: happy path with verification — count=2, inventory grows by 1 each collect', async () => {
+    const mockBot = makeMockBot();
+    mockBot.findBlock
+      .mockReturnValueOnce(mockBlock())
+      .mockReturnValueOnce(mockBlock());
+
+    const result = await mine({ target: 'oak_log', count: 2 }, mockBot);
+
+    expect(result).toEqual({
+      items_collected: 2,
+      item_type: 'oak_log',
+      last_position: { x: 5, y: 64, z: 5 },
+    });
+    expect(mockBot.collectBlock.collect).toHaveBeenCalledTimes(2);
+    expect(mockBot.inventory.items).toHaveBeenCalled();
+  });
+
+  // T12: collect resolves on iteration 0 but inventory unchanged — throws with correct message
+  it('T12: throws when collect resolves but inventory does not increase (iteration 0)', async () => {
+    const mockBot = makeMockBot();
+    mockBot.findBlock.mockReturnValueOnce(mockBlock());
+    // Override collect to NOT bump inventory
+    mockBot.collectBlock.collect.mockResolvedValue(undefined);
+
+    await expect(mine({ target: 'oak_log', count: 1 }, mockBot))
+      .rejects.toThrow(
+        /mine: collect resolved but inventory did not increase for "oak_log" \(collected 0 of 1 dug-and-resolved; possible pickup race\)/
+      );
+
+    expect(mockBot.collectBlock.collect).toHaveBeenCalledTimes(1);
+  });
+
+  // T13: mid-loop pickup failure — first 2 of 3 collects grow inventory, 3rd does not
+  it('T13: throws mid-loop when 3rd collect resolves but inventory does not increase (collected 2 of 3)', async () => {
+    const mockBot = makeMockBot();
+    mockBot.findBlock
+      .mockReturnValueOnce(mockBlock())
+      .mockReturnValueOnce(mockBlock())
+      .mockReturnValueOnce(mockBlock());
+
+    let callCount = 0;
+    mockBot.collectBlock.collect.mockImplementation(async () => {
+      callCount += 1;
+      // Only bump inventory for first 2 calls; 3rd call resolves without pickup
+      if (callCount <= 2) {
+        mockBot._bumpTarget();
+      }
+    });
+
+    await expect(mine({ target: 'oak_log', count: 3 }, mockBot))
+      .rejects.toThrow(
+        /mine: collect resolved but inventory did not increase for "oak_log" \(collected 2 of 3 dug-and-resolved; possible pickup race\)/
+      );
+
+    expect(mockBot.findBlock).toHaveBeenCalledTimes(3);
+    expect(mockBot.collectBlock.collect).toHaveBeenCalledTimes(3);
   });
 });
