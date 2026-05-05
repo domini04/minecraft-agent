@@ -549,3 +549,165 @@ app.listen(PORT, HOST);
 - Cloud Run / GKE separate pods: Set `BOT_HOST=0.0.0.0` and add auth middleware
 
 **Decision**: Localhost binding by default (`127.0.0.1`). Configurable via `BOT_HOST` env var for cloud deployment.
+
+---
+
+## Decision 22: LLM Configuration & Provider Abstraction
+
+**Phase**: 3 (Brain v1)
+
+**Question**: How does the Brain load LLM credentials and instantiate the chat model? Hard-coded provider, or swappable?
+
+**Context**: Decision 3 already locked "model-agnostic via LangChain." Phase 3 is when that abstraction becomes concrete code. Two questions need locking: (a) where does the API key come from, and (b) which LangChain entry point do we use for instantiation.
+
+| Option | Considered | Notes |
+|--------|:---------:|-------|
+| `init_chat_model("provider:model")` + `python-dotenv` | **Chosen** | LangChain's provider-agnostic factory. Resolves the right SDK based on the `provider:` prefix. Swap providers by config string, not code. `.env` keeps `GEMINI_API_KEY` out of source. |
+| Direct `ChatGoogleGenerativeAI(...)` import | Rejected | Pins Brain code to one provider. Defeats Decision 3. Forces a refactor every time we benchmark a different model. |
+| Read key from system env only (no `.env`) | Rejected | Works in production but adds friction in local dev. `python-dotenv` reads `.env` if present, falls back to system env if not — best of both. |
+
+**Implementation rule**: All LLM imports go through `langchain.chat_models.init_chat_model`. No `from langchain_google_genai import ...` outside a single optional provider-resolution module. `.env` loaded once at the brain entry point (CLI or future control-plane server), not per-module.
+
+**Decision**: `init_chat_model("google_genai:gemini-3-flash-preview", ...)` for v1, with `GEMINI_API_KEY` loaded from project-root `.env` via `python-dotenv`. Provider string lives in config; no provider-specific code paths.
+
+---
+
+## Decision 23: Tool Binding Strategy (JSON Schema vs Prose)
+
+**Phase**: 3 (Brain v1)
+
+**Question**: How is the LLM told about available tools — structured JSON schemas (native function-calling) or natural-language descriptions in the system prompt?
+
+**Context**: The Planner node must produce *valid* tool calls. Native function-calling APIs (Gemini, Claude, OpenAI) constrain the LLM's output to match a bound schema; natural-language tool lists rely on the LLM following a prose contract and on us parsing its output ourselves.
+
+| Option | Considered | Notes |
+|--------|:---------:|-------|
+| JSON Schema via LangChain `bind_tools()` | **Chosen** | Native function-calling. Provider validates parameter shape at the API boundary. LangChain returns parsed `tool_calls`, no regex/JSON-repair. Cross-provider portable (Gemini, Claude, OpenAI all supported). |
+| Natural-language tool list + custom parser | Rejected | LLM drift, missing fields, prose leakage. Forces a parser + retry layer. Reliability cost > flexibility benefit for our six tools. |
+
+**Why reliability won over flexibility**: This project's thesis is "LLM decides, deterministic code executes." A flaky tool-call parser pushes uncertainty back into the deterministic side. `bind_tools` keeps the uncertainty contained at the LLM-API boundary where it belongs.
+
+**Caveat for later**: smaller local models (Ollama, etc.) have weaker tool-calling. If we test those in Phase 5, we may need a fallback parser path. Out of scope for v1.
+
+**Decision**: All tools bound via `llm.bind_tools([...])`. No custom prompt-based tool list, no hand-rolled parser.
+
+---
+
+## Decision 24: Phase 3 Brain v1 Scope & Stop Condition
+
+**Phase**: 3 (Brain v1)
+
+**Question**: How ambitious is the v1 Brain — single-step or multi-step goals? When does the agent stop?
+
+**Context**: Phase 3 lands the planner+executor loop. The acceptance gate (`PROGRESSION_PLAN.md`) is "agent achieves a single goal end-to-end." Two sub-decisions: how many tool calls per goal, and what stops the loop.
+
+| Aspect | Choice | Reasoning |
+|--------|--------|-----------|
+| Initial goal complexity | **Single-step** ("chat hello", "navigate to X,Y,Z") | Locks the harness end-to-end before chasing planning intelligence. Sprint 3i (live smoke) verifies the full path with minimum confounding variables. |
+| Multi-step path | Phase 3.5 / Phase 4 expansion | Once Phase 3 smoke is green, the same graph supports multi-step by virtue of the planner→executor loop. No graph rewrite needed. |
+| Stop condition | **Fixed iteration cap** (`MAX_ITERATIONS = 10` in `brain/src/state.py`) | Simple, deterministic, debuggable. The conditional edge in Sprint 3g compares `state["iteration_count"]` against the cap. |
+| LLM self-reports done | Deferred to Phase 5 | Intelligent goal-completion checking ("is the goal satisfied?") is a Reflexion-adjacent concern. Useful, but out of scope for v1. |
+
+**Decision**: Phase 3 ships single-step goals with a fixed 10-iteration cap. Multi-step and intelligent stop deferred to later phases — same graph, no breaking changes anticipated.
+
+---
+
+## Decision 25: AgentState v1 (Phase-3 Subset)
+
+**Phase**: 3 (Brain v1)
+
+**Question**: Does `brain/src/state.py` implement the full forward-looking schema in `AGENT_STATE.md` (9 fields covering Phases 3–5), or only the fields Phase 3 actually consumes?
+
+**Context**: `docs/AGENT_STATE.md` is the forward-looking complete spec — written during blueprint clarification, includes fields for Guide Retriever (`guide`), Reflexion (`errors`, `retry_count`) which don't have nodes yet. Building all 9 now means dead state today; building only Phase-3 fields means a typed-additions-later plan.
+
+| Option | Considered | Notes |
+|--------|:---------:|-------|
+| Full 9-field schema now (Plan A) | Rejected | Dead fields confuse future readers about what the v1 graph actually consumes. TypedDict additions are non-breaking — there's no migration cost to deferring. |
+| Phase-3 subset only (Plan B) | **Chosen** | Seven fields the v1 nodes actually read/write: `goal`, `plan`, `current_step`, `step_results`, `bot_status`, `iteration_count`, `result`. Phases 4–5 extend the TypedDict additively. |
+
+**Implementation choices baked in alongside**:
+- `TypedDict` with `total=False` so initial state can be constructed incrementally as nodes write fields.
+- `make_initial_state(goal: str)` factory seeds all seven fields with empty defaults — fresh literals per call, no shared mutable templates.
+- `MAX_ITERATIONS = 10` lives in `state.py` next to the field it bounds (`iteration_count`).
+- No `Annotated[..., reducer]` patterns — graph is strictly sequential (planner → executor), single-writer-per-field.
+
+**`AGENT_STATE.md` discipline**: the doc remains the forward-looking complete spec. Each phase appends one Changelog row when its subset lands; field descriptions stay untouched until they need correction.
+
+**Decision**: Phase-3 subset only at `brain/src/state.py` (Sprint 3b, commit `531b55e`). `guide` / `errors` / `retry_count` deferred to their owning phases (4 / 5 / 5).
+
+---
+
+## Decision 26: Tool Schema Source-of-Truth (Shared JSON Schema)
+
+**Phase**: 3 (Brain v1)
+
+**Question**: Where do tool schemas live? Hand-mirrored Python copies of the body's JS validators, or one shared cross-language definition?
+
+**Context**: For `bind_tools()` to work (Decision 23), Brain needs Python-side schema declarations — the LLM has never seen the body's JS code. Two source-of-truth options:
+
+| Option | Considered | Notes |
+|--------|:---------:|-------|
+| Hand-mirror in Python (`@tool` per tool) | Rejected | Fast to implement; minimal new infra. But two sources of truth — body's JS validators + brain's Python decorators. Drift risk grows with every new tool or param change. Phase 5+ adds tools; the cost is real, not theoretical. |
+| Single shared JSON Schema | **Chosen** | One contract per tool at `shared/tool-schemas/<tool>.json` (Draft 2020-12). Body uses `ajv` to validate; Brain loads and produces LangChain `StructuredTool`s + Pydantic models. Adding a tool = one JSON edit, both sides pick it up. |
+
+**Why this overrides "ship Phase 3 fast"**: Decision 10 (coarse composite tools) means each tool's contract is meaningful — params like `count`, `max_distance`, `target` block-name aren't trivia. Drift between body validation and LLM-bound schemas would silently degrade tool-call reliability (LLM thinks param X is optional, body rejects it; LLM uses block name "log", body wants "oak_log"). The whole "deterministic tooling" thesis depends on those contracts staying aligned.
+
+**Implementation impact**: Two new sprints front-load the cost — one to migrate body's hand-rolled validators to `ajv` against the shared JSON, one to build brain's loader. Downstream sprints (planner, executor) become smaller because they consume typed objects instead of dict-shuffling.
+
+**Drift-prevention**: each side has a small test that exercises a known-good and known-bad payload through the validator. If a schema field is added/removed, the test catches the desync.
+
+**Decision**: Shared JSON Schema (Draft 2020-12) at `shared/tool-schemas/`. Body uses `ajv`, Brain generates LangChain tools + Pydantic models. Front-loaded as Sprints 3c-new and 3d-new before the planner node lands.
+
+---
+
+## Decision 27: Pydantic Validation of LLM Tool-Call Output
+
+**Phase**: 3 (Brain v1)
+
+**Question**: Is `bind_tools()`'s built-in schema validation enough, or do we also coerce LLM tool calls into Pydantic models inside Brain?
+
+**Context**: `bind_tools()` validates against the schema bound at the API boundary, but: (a) provider-side validation surfaces as untyped dicts in Python, (b) downstream nodes lose type information without re-validation, (c) we want a single typed object to flow through the graph rather than re-typing dicts at every node.
+
+| Option | Considered | Notes |
+|--------|:---------:|-------|
+| Trust `bind_tools()` schema validation only | Rejected | LLM still hands us untyped dicts; downstream code needs runtime type checks anyway. Loses the typed-everywhere benefit. |
+| Coerce into Pydantic models at every node boundary | **Chosen** | One canonical typed object per tool call. Validation errors are explicit and routable. Models generated from the shared JSON Schema (Decision 26), so no third source of truth. |
+
+**Models added in Phase 3**:
+- One `*Args` Pydantic model per tool, generated from `shared/tool-schemas/<tool>.json` (e.g. `MineArgs`, `NavigateArgs`).
+- `PlannerOutput` — discriminated-union wrapper over `(tool_name, args)`. Brain's planner node returns this; executor node consumes it.
+- `ToolResult` — typed wrapper around the body's frozen `/execute` envelope (`success | data | error | duration_ms`). `BodyClient.execute(...)` returns this rather than a raw dict.
+
+**Why now and not later**: introducing Pydantic in Phase 5 would require refactoring all nodes that pass dicts. Doing it together with the shared-schema sprint (Decision 26) is one cost; deferring is two costs.
+
+**Pydantic availability**: already installed transitively via `langchain` — no new pyproject dep needed.
+
+**Decision**: Pydantic models for tool args, `PlannerOutput`, and `ToolResult` introduced alongside the shared JSON Schema work (Sprint 3d-new). Models generated from the shared schemas; brain coerces LLM tool calls into typed objects at every node boundary.
+
+---
+
+## Decision 28: In-World Control Pane (Deferred)
+
+**Phase**: Deferred — Phase 3.5 or Phase 8
+
+**Question**: Should the agent also accept commands issued from inside Minecraft chat (e.g. `!agent mine 5 oak_log`), or stay CLI-only?
+
+**Context**: Today the only entry point is `python -m brain "<goal>"`. A natural extension is letting any player on the MC server issue predefined commands via in-game chat, with the bot picking them up and executing the existing planner→executor loop. This adds a second control surface; the engine itself doesn't change.
+
+**Confirmed scope when this lands**:
+
+| Aspect | Choice | Reasoning |
+|--------|--------|-----------|
+| Command syntax | **Predefined whitelist only** (`!agent mine <block> <count>`, etc.) | Free-form NL would need an LLM-powered command interpreter — too much complexity for the entry surface. Defer free-form to a follow-up. |
+| User auth | **Any player on the server** | Phase 3.5 is single-server local dev; whitelist/op-only can come if multi-user trust matters. |
+| Brain lifecycle | **Always-on background service** | New endpoint `POST /goal` on a brain HTTP server (port 3001 by default). Body's chat listener forwards parsed commands. Spawn-on-demand was rejected: 1–3 s Python startup per command makes chat feel broken, and Phase 5 Reflexion benefits from cross-command memory. |
+| Architecture shape | Symmetric localhost RPC | Brain ←POST /goal← Body (new) plus Brain →POST /execute→ Body (existing). Webhook-shaped on the wire but not a webhook in lifecycle/trust — both endpoints bind to `127.0.0.1`, no auth required, request/response not fire-and-forget. |
+
+**Why deferred, not built now**:
+1. Adds no new engine logic — same planner+executor as Phase 3. Building it now blurs the Phase 3 acceptance gate.
+2. CLI-first is the cleanest debug surface for the planner contract; chasing a planner bug through MC chat would be miserable.
+3. Async/concurrency design (queue-vs-reject, "bot is busy" semantics, `!agent stop` cancellation, per-step chat updates) is its own design problem worth focusing on separately.
+
+**Constraint locked now to keep deferral cheap**: Phase 3 entry point is "given `goal: str`, return `result: str`" — no CLI-specific assumptions baked into `AgentState` or graph wiring. Phase 3.5 then adds the chat surface as a pure addition (no Phase 3 refactor).
+
+**Decision**: Defer to Phase 3.5 or Phase 8. When built: predefined commands, any player, always-on brain HTTP server with `POST /goal` endpoint. Constraint above is honored in Phase 3 design to keep the deferral free.
