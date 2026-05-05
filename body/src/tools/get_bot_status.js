@@ -3,12 +3,16 @@
 // This is the LLM's primary way of "seeing" the world state.
 // Strategy A: reads exclusively from the passed-in bot argument (no module-level singleton).
 
+const { validateParams } = require('../utils/validate_params');
+
 /**
- * @param {object} _params - Ignored; no required fields.
+ * @param {object} _params - Ignored; no required fields. Schema enforces
+ *   `additionalProperties: false` so bogus extras are rejected uniformly.
  * @param {object} bot - The Mineflayer bot instance injected by the dispatcher.
  * @returns {Promise<{health, food, position, inventory, nearby_entities}>}
  */
 async function get_bot_status(_params, bot) {
+  validateParams('get_bot_status', _params || {});
   if (!bot) {
     throw new Error('get_bot_status: bot not connected');
   }

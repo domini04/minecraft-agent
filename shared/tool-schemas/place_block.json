@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "place_block",
+  "description": "Places a block from inventory at world coordinates (x, y, z). Float coordinates are accepted and rounded.",
+  "type": "object",
+  "properties": {
+    "block": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "\\S"
+    },
+    "x": { "type": "number" },
+    "y": { "type": "number" },
+    "z": { "type": "number" }
+  },
+  "required": ["block", "x", "y", "z"],
+  "additionalProperties": false
+}

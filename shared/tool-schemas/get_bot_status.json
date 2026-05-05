@@ -1,0 +1,9 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "get_bot_status",
+  "description": "Returns the bot's current status: health, food, position, inventory, and nearby entities.",
+  "type": "object",
+  "properties": {},
+  "required": [],
+  "additionalProperties": false
+}

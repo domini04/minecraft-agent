@@ -6,6 +6,7 @@
 
 const Vec3 = require('vec3');
 const { goals } = require('mineflayer-pathfinder');
+const { validateParams } = require('../utils/validate_params');
 
 /**
  * Crafts `count` of `item`, optionally using a crafting table at `crafting_table_pos`.
@@ -19,31 +20,9 @@ const { goals } = require('mineflayer-pathfinder');
  * @throws {Error} With 'craft:' prefix for all failure modes.
  */
 async function craft(params, bot) {
-  const { item, count, crafting_table_pos } = params || {};
-
-  // --- Param validation (order per D2) ---
-
-  // 1. item must be non-empty string
-  if (typeof item !== 'string' || item.trim() === '') {
-    throw new Error('craft: item must be a non-empty string');
-  }
-
-  // 2. count must be positive integer
-  if (!Number.isInteger(count) || count < 1) {
-    throw new Error('craft: count must be a positive integer');
-  }
-
-  // 3. crafting_table_pos, if provided, must have integer x/y/z
-  if (crafting_table_pos !== undefined) {
-    const { x, y, z } = crafting_table_pos || {};
-    if (
-      !Number.isInteger(x) ||
-      !Number.isInteger(y) ||
-      !Number.isInteger(z)
-    ) {
-      throw new Error('craft: crafting_table_pos must be {x, y, z} integers');
-    }
-  }
+  // --- Param validation (JSON-Schema-driven) ---
+  validateParams('craft', params || {});
+  const { item, count, crafting_table_pos } = params;
 
   // 4. bot must not be null/undefined
   if (!bot) {

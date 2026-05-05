@@ -63,7 +63,10 @@ app.post('/execute', asyncHandler(async (req, res) => {
     const data = await withTimeout(handler(params, getBot()), ACTION_TIMEOUT_MS);
     return res.json(buildSuccess(toolName, data, durationMs()));
   } catch (err) {
-    const code = err instanceof TimeoutError ? 'TIMEOUT' : 'ACTION_FAILED';
+    let code;
+    if (err instanceof TimeoutError) code = 'TIMEOUT';
+    else if (err && err.code === 'INVALID_PARAMS') code = 'INVALID_PARAMS';
+    else code = 'ACTION_FAILED';
     return res.json(buildError(toolName, code, err.message, null, durationMs()));
   }
 }));

@@ -1,0 +1,29 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "craft",
+  "description": "Crafts `count` of `item`. If `crafting_table_pos` is provided, navigates to and uses that crafting table.",
+  "type": "object",
+  "properties": {
+    "item": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "\\S"
+    },
+    "count": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "crafting_table_pos": {
+      "type": "object",
+      "properties": {
+        "x": { "type": "integer" },
+        "y": { "type": "integer" },
+        "z": { "type": "integer" }
+      },
+      "required": ["x", "y", "z"],
+      "additionalProperties": false
+    }
+  },
+  "required": ["item", "count"],
+  "additionalProperties": false
+}

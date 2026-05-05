@@ -3,6 +3,7 @@
 // Phase 2 implementation.
 
 const { goals } = require('mineflayer-pathfinder');
+const { validateParams } = require('../utils/validate_params');
 
 // Read once at module load — not per-call — because the value is env-configured
 // and doesn't need to react to runtime changes.
@@ -32,11 +33,9 @@ const NAVIGATE_THINK_TIMEOUT_MS = readEnvTimeout();
  * @returns {Promise<{reached: true, position: {x: number, y: number, z: number}}>}
  */
 async function navigate(params, bot) {
-  const { x, y, z } = params || {};
+  validateParams('navigate', params || {});
+  const { x, y, z } = params;
 
-  if (![x, y, z].every(Number.isFinite)) {
-    throw new Error('navigate: x, y, z must be finite numbers');
-  }
   if (!bot) {
     throw new Error('navigate: bot not connected');
   }

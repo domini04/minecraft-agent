@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "navigate",
+  "description": "Pathfinds the bot to within 1 block of integer block (x, y, z). Float coordinates are accepted and rounded.",
+  "type": "object",
+  "properties": {
+    "x": { "type": "number" },
+    "y": { "type": "number" },
+    "z": { "type": "number" }
+  },
+  "required": ["x", "y", "z"],
+  "additionalProperties": false
+}

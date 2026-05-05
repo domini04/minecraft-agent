@@ -3,8 +3,9 @@
 // collects the drop, and repeats until count is met.
 // Phase 2 implementation.
 
+const { validateParams } = require('../utils/validate_params');
+
 const DEFAULT_MAX_DISTANCE = 32;
-const MAX_DISTANCE_CAP = 128;
 
 /**
  * Returns how many milliseconds to wait after bot.collectBlock.collect resolves
@@ -36,25 +37,14 @@ function getSettleMs() {
  * @throws {Error} With 'mine:' prefix for all failure modes (param validation, bot state, block not found, collect failure).
  */
 async function mine(params, bot) {
-  // --- Param validation ---
-  const { target, count, max_distance } = params || {};
+  // --- Param validation (JSON-Schema-driven) ---
+  validateParams('mine', params || {});
+  const { target, count, max_distance } = params;
 
-  if (typeof target !== 'string' || target.trim() === '') {
-    throw new Error('mine: target must be a non-empty string');
-  }
-
-  if (!Number.isInteger(count) || count < 1) {
-    throw new Error('mine: count must be a positive integer');
-  }
-
+  // JS-side default for max_distance — schemas describe shape, not behavior
+  // (option 1 from sprint plan). Schema range [1,128] is enforced by ajv.
   const maxDistance =
     max_distance === undefined ? DEFAULT_MAX_DISTANCE : max_distance;
-
-  if (max_distance !== undefined) {
-    if (!Number.isInteger(max_distance) || max_distance < 1 || max_distance > MAX_DISTANCE_CAP) {
-      throw new Error('mine: max_distance must be an integer between 1 and 128');
-    }
-  }
 
   // --- Bot/plugin guards ---
   if (!bot) {

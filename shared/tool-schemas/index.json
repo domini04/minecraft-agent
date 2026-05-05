@@ -1,0 +1,8 @@
+{
+  "chat": "chat.json",
+  "get_bot_status": "get_bot_status.json",
+  "navigate": "navigate.json",
+  "mine": "mine.json",
+  "craft": "craft.json",
+  "place_block": "place_block.json"
+}

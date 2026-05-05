@@ -5,6 +5,7 @@
 
 const Vec3 = require('vec3');
 const { goals } = require('mineflayer-pathfinder');
+const { validateParams } = require('../utils/validate_params');
 
 /**
  * Returns how many milliseconds to wait after bot.placeBlock resolves before
@@ -39,19 +40,10 @@ function getSettleMs() {
  *   when the server reverts the placement after bot.placeBlock resolves.
  */
 async function place_block(params, bot) {
-  const { block, x, y, z } = params || {};
-
-  // --- Param validation (D2 order) ---
-
-  // 1. block must be a non-empty string
-  if (typeof block !== 'string' || block.trim() === '') {
-    throw new Error('place_block: block must be a non-empty string');
-  }
-
-  // 2. x, y, z must all be finite numbers
-  if (![x, y, z].every(Number.isFinite)) {
-    throw new Error('place_block: x, y, z must be finite numbers');
-  }
+  // --- Param validation (JSON-Schema-driven; finite-numbers post-pass
+  //     in validateParams keeps T9c/T9d behavior identical). ---
+  validateParams('place_block', params || {});
+  const { block, x, y, z } = params;
 
   // 3. bot must not be null/undefined
   if (!bot) {
