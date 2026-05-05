@@ -7,6 +7,23 @@ const Vec3 = require('vec3');
 const { goals } = require('mineflayer-pathfinder');
 
 /**
+ * Returns how many milliseconds to wait after bot.placeBlock resolves before
+ * re-reading world state to verify the placement was not reverted by the server.
+ *
+ * Resolution order:
+ *   1. PLACE_BLOCK_VERIFY_SETTLE_MS env var (explicit override for tuning in production)
+ *   2. JEST_WORKER_ID present → 0 ms (avoid 200ms × N dead time in jest)
+ *   3. Default 200 ms (tight budget for server revert packets on localhost)
+ */
+function getSettleMs() {
+  if (process.env.PLACE_BLOCK_VERIFY_SETTLE_MS !== undefined) {
+    return Number(process.env.PLACE_BLOCK_VERIFY_SETTLE_MS);
+  }
+  if (process.env.JEST_WORKER_ID !== undefined) return 0;
+  return 200;
+}
+
+/**
  * Places `block` at world coordinates (x, y, z).
  * Float coords are accepted and rounded with Math.round to the nearest block.
  *
@@ -17,7 +34,9 @@ const { goals } = require('mineflayer-pathfinder');
  *   - z: Target block Z coordinate (finite number, rounded).
  * @param {import('mineflayer').Bot} bot - The Mineflayer bot instance injected by the dispatcher.
  * @returns {Promise<{placed: true, block: string, position: {x: number, y: number, z: number}}>}
- * @throws {Error} With 'place_block: ' prefix for all failure modes.
+ * @throws {Error} With 'place_block: ' prefix for all failure modes, including
+ *   'place_block: placement reverted by server (no block at {x,y,z} after placeBlock)'
+ *   when the server reverts the placement after bot.placeBlock resolves.
  */
 async function place_block(params, bot) {
   const { block, x, y, z } = params || {};
@@ -116,6 +135,18 @@ async function place_block(params, bot) {
     await bot.placeBlock(referenceBlock, faceVec);
   } catch (err) {
     throw new Error(`place_block: placeBlock failed: ${err.message}`);
+  }
+
+  // --- Post-placement verification (Sprint 9) ---
+  // bot.placeBlock resolves on packet acknowledgement, not on confirmed world
+  // mutation. Server revert packets (Block-Update) arrive 50–500ms later.
+  // Wait briefly then re-read world state to verify the block is actually there.
+  await new Promise(r => setTimeout(r, getSettleMs()));
+  const verifyBlock = bot.blockAt(targetPos);
+  if (!verifyBlock || verifyBlock.name === 'air') {
+    throw new Error(
+      `place_block: placement reverted by server (no block at {${tx},${ty},${tz}} after placeBlock)`
+    );
   }
 
   // --- Return success (D7) ---

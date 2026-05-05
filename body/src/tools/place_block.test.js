@@ -30,12 +30,17 @@ describe('place_block tool', () => {
     const bot = makeMockBot();
     const tx = 10, ty = 64, tz = 20;
 
-    // Target (10,64,20) is air; neighbor below (10,63,20) is dirt
+    // Target (10,64,20) is air; neighbor below (10,63,20) is dirt.
+    // placeBlock mock mutates the world map so post-place blockAt returns non-air.
     const dirtBlock = { name: 'dirt' };
-    bot.blockAt.mockImplementation(blockAtFromMap({
+    const worldMap = {
       [`${tx},${ty},${tz}`]:     { name: 'air' },
       [`${tx},${ty - 1},${tz}`]: dirtBlock,
-    }));
+    };
+    bot.blockAt.mockImplementation(blockAtFromMap(worldMap));
+    bot.placeBlock.mockImplementation(async () => {
+      worldMap[`${tx},${ty},${tz}`] = { name: 'crafting_table' };
+    });
 
     const craftingTableItem = { name: 'crafting_table', count: 1 };
     bot.inventory.items.mockReturnValue([craftingTableItem]);
@@ -70,11 +75,16 @@ describe('place_block tool', () => {
     const bot = makeMockBot();
     const tx = 11, ty = 64, tz = 21; // expected after rounding
 
+    // placeBlock mock mutates the world map so post-place blockAt returns non-air.
     const dirtBlock = { name: 'dirt' };
-    bot.blockAt.mockImplementation(blockAtFromMap({
+    const worldMap = {
       [`${tx},${ty},${tz}`]:     { name: 'air' },
       [`${tx},${ty - 1},${tz}`]: dirtBlock,
-    }));
+    };
+    bot.blockAt.mockImplementation(blockAtFromMap(worldMap));
+    bot.placeBlock.mockImplementation(async () => {
+      worldMap[`${tx},${ty},${tz}`] = { name: 'dirt' };
+    });
 
     const dirtItem = { name: 'dirt', count: 1 };
     bot.inventory.items.mockReturnValue([dirtItem]);
@@ -266,5 +276,99 @@ describe('place_block tool', () => {
     await expect(
       place_block({ block: 'dirt', x: 10, y: 64, z: 20 }, bot)
     ).rejects.toThrow(/place_block: pathfinder plugin not loaded/);
+  });
+
+  // T12: Happy path with explicit verification — pre-place target is air,
+  // post-place (after placeBlock mock mutates world map) target is non-air.
+  it('T12: verified happy path — pre-place air, post-place non-air, returns success', async () => {
+    const bot = makeMockBot();
+    const tx = 10, ty = 64, tz = 20;
+
+    const worldMap = {
+      [`${tx},${ty},${tz}`]:     { name: 'air' },
+      [`${tx},${ty - 1},${tz}`]: { name: 'dirt' },
+    };
+    bot.blockAt.mockImplementation(blockAtFromMap(worldMap));
+    bot.placeBlock.mockImplementation(async () => {
+      worldMap[`${tx},${ty},${tz}`] = { name: 'dirt' };
+    });
+
+    const dirtItem = { name: 'dirt', count: 1 };
+    bot.inventory.items.mockReturnValue([dirtItem]);
+
+    const result = await place_block({ block: 'dirt', x: tx, y: ty, z: tz }, bot);
+
+    // Success shape unchanged (C9)
+    expect(result).toEqual({ placed: true, block: 'dirt', position: { x: 10, y: 64, z: 20 } });
+
+    // bot.blockAt was called for target both before AND after bot.placeBlock
+    const targetCalls = bot.blockAt.mock.calls.filter(
+      c => c[0].x === tx && c[0].y === ty && c[0].z === tz
+    );
+    expect(targetCalls.length).toBeGreaterThanOrEqual(2);
+  });
+
+  // T13: Server-revert detection — placeBlock resolves but does NOT mutate world;
+  // post-place blockAt still returns air → tool must throw placement reverted.
+  it('T13: throws placement reverted when post-place blockAt returns air', async () => {
+    const bot = makeMockBot();
+    const tx = 10, ty = 64, tz = 20;
+
+    // placeBlock resolves without mutating the map → target stays air
+    bot.blockAt.mockImplementation(blockAtFromMap({
+      [`${tx},${ty},${tz}`]:     { name: 'air' },
+      [`${tx},${ty - 1},${tz}`]: { name: 'dirt' },
+    }));
+    // placeBlock uses default mock (resolves undefined) — world unchanged
+
+    const dirtItem = { name: 'dirt', count: 1 };
+    bot.inventory.items.mockReturnValue([dirtItem]);
+
+    await expect(
+      place_block({ block: 'dirt', x: tx, y: ty, z: tz }, bot)
+    ).rejects.toThrow(
+      /place_block: placement reverted by server \(no block at \{10,64,20\} after placeBlock\)/
+    );
+
+    // Placement was attempted — both equip and placeBlock must have been called
+    expect(bot.equip).toHaveBeenCalled();
+    expect(bot.placeBlock).toHaveBeenCalled();
+  });
+
+  // T14: Post-place blockAt returns null (chunk unloaded) → tool must throw placement reverted.
+  it('T14: throws placement reverted when post-place blockAt returns null (chunk unloaded)', async () => {
+    const bot = makeMockBot();
+    const tx = 10, ty = 64, tz = 20;
+
+    // Neighbor scan needs dirt below; after placeBlock resolves, subsequent
+    // call for target returns null (chunk unloaded scenario).
+    let callCount = 0;
+    bot.blockAt.mockImplementation((vec) => {
+      const key = `${vec.x},${vec.y},${vec.z}`;
+      if (key === `${tx},${ty - 1},${tz}`) return { name: 'dirt' };
+      if (key === `${tx},${ty},${tz}`) {
+        callCount++;
+        // First call (pre-flight target check) and neighbor scan → air
+        // Last call (verification, after placeBlock) → null
+        // We know blockAt for target is called once at pre-flight, then once at verify.
+        // To distinguish: return null only when placeBlock has already been called.
+        if (bot.placeBlock.mock.calls.length > 0) return null;
+        return { name: 'air' };
+      }
+      return null;
+    });
+
+    const dirtItem = { name: 'dirt', count: 1 };
+    bot.inventory.items.mockReturnValue([dirtItem]);
+
+    await expect(
+      place_block({ block: 'dirt', x: tx, y: ty, z: tz }, bot)
+    ).rejects.toThrow(
+      /place_block: placement reverted by server \(no block at \{10,64,20\} after placeBlock\)/
+    );
+
+    // Placement was attempted
+    expect(bot.equip).toHaveBeenCalled();
+    expect(bot.placeBlock).toHaveBeenCalled();
   });
 });
