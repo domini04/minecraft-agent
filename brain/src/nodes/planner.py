@@ -42,19 +42,109 @@ if TYPE_CHECKING:
     from langchain_core.language_models import BaseChatModel
 
 
-# Frozen system prompt -- MUST match Sprint 3e plan §System prompt verbatim.
+# Frozen system prompt -- MUST match Sprint 3j plan §System prompt verbatim.
 # Long lines are required to preserve byte-for-byte equivalence with the plan,
 # hence the per-line E501 silencing.
 _SYSTEM_PROMPT = (
     "You are the Planner for an autonomous Minecraft agent. The user gives a goal in natural language. You decide which ONE tool to call next to advance the goal, then return that tool call.\n"  # noqa: E501
     "\n"
-    "If the goal is already satisfied based on the bot's current state, return no tool call (you may include a brief textual confirmation).\n"  # noqa: E501
+    "You will see a list of steps already executed in this session (most recent first), each with the tool name, the args you chose last time, and the outcome. Use this history together with the bot's current state to recognize when the goal is already satisfied — in that case, return no tool call (you may include a brief textual confirmation). Do not repeat a tool call that already succeeded and accomplished the goal.\n"  # noqa: E501
     "\n"
     "The six available tools are bound to this conversation via the function-calling interface; use them. Do not narrate, do not plan multiple steps ahead, and do not return multiple tool calls — return exactly one tool call (or none)."  # noqa: E501
 )
 
 
-def _format_human_message(goal: str, bot_status: dict) -> str:
+def _format_step_history(step_results: list[dict], plan: list[dict]) -> str:
+    """Render the 'Steps already executed' block (frozen format).
+
+    Returns the full multi-line block, including the
+    ``Steps already executed (most recent first):`` header. If
+    ``step_results`` is empty, the body is the single sentinel line
+    ``  (no steps executed yet)``. Otherwise the most-recent-first list
+    of step lines is rendered, capped at the last 10 entries with an
+    omission hint above when more exist.
+
+    This function does NOT mutate either input. ``step_results`` is sliced
+    (which produces a fresh list) and then iterated; ``plan`` is only
+    indexed. The frozen per-line shape is::
+
+        [N] tool_name(k=repr(v), ...) -> success
+        [N] tool_name(k=repr(v), ...) -> error: <CODE> "<MESSAGE>"
+
+    where ``N`` is 1-based and matches "iteration N".
+    """
+    header = "Steps already executed (most recent first):"
+
+    if not step_results:
+        return f"{header}\n  (no steps executed yet)"
+
+    total = len(step_results)
+    # Show only the last 10 entries, in storage order (oldest of-the-visible
+    # first); we then reverse so most recent appears first. Slicing returns
+    # fresh lists -- no mutation of inputs.
+    visible = step_results[-10:]
+    # Map visible entries back to their original 1-based index. The last
+    # entry's display index is `total`; the entry before it is `total-1`; etc.
+    visible_indices = list(range(total - len(visible) + 1, total + 1))
+
+    lines: list[str] = [header]
+    if total > 10:
+        omitted = total - 10
+        lines.append(f"  ... ({omitted} earlier steps omitted) ...")
+
+    # Reverse so most-recent-first.
+    for display_idx, step in zip(
+        reversed(visible_indices), reversed(visible), strict=True
+    ):
+        # Storage position of this step in the original step_results list.
+        storage_idx = display_idx - 1
+
+        # Tool name: prefer step_results[i]["tool"], fall back to
+        # plan[i]["tool_name"], else literal "unknown_tool".
+        tool_name = step.get("tool") if isinstance(step, dict) else None
+        if not tool_name:
+            if storage_idx < len(plan) and isinstance(plan[storage_idx], dict):
+                tool_name = plan[storage_idx].get("tool_name")
+        if not tool_name:
+            tool_name = "unknown_tool"
+
+        # Args: pull from plan[i]["args"] (a dict). Render as
+        # key=repr(value), joined by ", ", in dict insertion order. If
+        # plan[i] is missing, render no args (empty parens).
+        if storage_idx < len(plan) and isinstance(plan[storage_idx], dict):
+            args = plan[storage_idx].get("args") or {}
+        else:
+            args = {}
+        if isinstance(args, dict) and args:
+            args_str = ", ".join(f"{k}={v!r}" for k, v in args.items())
+        else:
+            args_str = ""
+
+        # Outcome: success -> " -> success"; failure -> error code+message.
+        success = bool(step.get("success")) if isinstance(step, dict) else False
+        if success:
+            outcome = " -> success"
+        else:
+            err = step.get("error") if isinstance(step, dict) else None
+            if isinstance(err, dict):
+                code = err.get("code") or "<unknown>"
+                message = err.get("message") or "<unknown>"
+            else:
+                code = "<unknown>"
+                message = "<unknown>"
+            outcome = f' -> error: {code} "{message}"'
+
+        lines.append(f"  [{display_idx}] {tool_name}({args_str}){outcome}")
+
+    return "\n".join(lines)
+
+
+def _format_human_message(
+    goal: str,
+    bot_status: dict,
+    step_results: list[dict],
+    plan: list[dict],
+) -> str:
     """Render the compact human-message template fed to the Planner LLM.
 
     Format (frozen):
@@ -67,12 +157,22 @@ def _format_human_message(goal: str, bot_status: dict) -> str:
         - food: <value> | unknown
         - inventory: <name1, name2, ...> | empty
 
-        Decide the next single tool call.
+        Steps already executed (most recent first):
+          (no steps executed yet)
+          | [N] tool_name(k=repr(v), ...) -> success
+          | [N] tool_name(...) -> error: <CODE> "<MESSAGE>"
+
+        Decide the next single tool call. If the goal is already satisfied
+        based on the steps above and the bot status, return no tool call.
 
     Position is rendered numerically without rounding when ``bot_status``
     carries a ``{"x", "y", "z"}`` sub-dict; otherwise ``unknown``. Inventory
     is rendered as a comma-joined list of item names (counts deliberately
     omitted to keep the prompt compact, per Constraint 2).
+
+    The step-history block is delegated to ``_format_step_history`` --
+    see that function for per-step formatting rules and truncation. Neither
+    helper mutates ``step_results`` or ``plan``.
     """
     pos = bot_status.get("position")
     if isinstance(pos, dict) and "x" in pos and "y" in pos and "z" in pos:
@@ -88,11 +188,11 @@ def _format_human_message(goal: str, bot_status: dict) -> str:
 
     inventory = bot_status.get("inventory") or []
     names = [
-        item["name"]
-        for item in inventory
-        if isinstance(item, dict) and "name" in item
+        item["name"] for item in inventory if isinstance(item, dict) and "name" in item
     ]
     inventory_str = ", ".join(names) if names else "empty"
+
+    history_block = _format_step_history(step_results, plan)
 
     return (
         f"Goal: {goal}\n"
@@ -103,7 +203,9 @@ def _format_human_message(goal: str, bot_status: dict) -> str:
         f"- food: {food_str}\n"
         f"- inventory: {inventory_str}\n"
         "\n"
-        "Decide the next single tool call."
+        f"{history_block}\n"
+        "\n"
+        "Decide the next single tool call. If the goal is already satisfied based on the steps above and the bot status, return no tool call."  # noqa: E501
     )
 
 
@@ -141,6 +243,8 @@ def planner_node(
         content=_format_human_message(
             new_state.get("goal", ""),
             new_state.get("bot_status", {}) or {},
+            list(new_state.get("step_results", []) or []),
+            list(new_state.get("plan", []) or []),
         )
     )
     response = bound.invoke([system, human])

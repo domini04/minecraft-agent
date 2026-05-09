@@ -133,9 +133,7 @@ def test_planner_bad_tool_call_sets_error_result():
 
     new_state = planner_node(state, llm=stub)
 
-    assert new_state["result"].startswith(
-        "planner: LLM produced invalid tool call:"
-    )
+    assert new_state["result"].startswith("planner: LLM produced invalid tool call:")
     assert new_state["plan"] == []
     assert new_state["iteration_count"] == 1
 
@@ -210,6 +208,177 @@ def test_planner_invoke_messages_shape():
     human_content = messages[1].content
     assert "Goal: get oak logs" in human_content
     assert "position: x=10, y=64, z=20" in human_content
+    # Empty-history branch: state has step_results=[] from make_initial_state.
+    assert "(no steps executed yet)" in human_content
+
+
+# ---------- J1: empty history sentinel ----------
+
+
+def test_planner_human_message_empty_history():
+    """J1: step_results=[] renders the sentinel and no spurious step rows."""
+    response = AIMessage(
+        content="",
+        tool_calls=[
+            {
+                "name": "chat",
+                "args": {"message": "hi"},
+                "id": "j1",
+            }
+        ],
+    )
+    stub = StubLLM(response)
+    state = _initial_state(goal="say hi")
+    # Explicit, even though make_initial_state already sets these.
+    state["step_results"] = []
+    state["plan"] = []
+
+    planner_node(state, llm=stub)
+
+    human_content = stub.invoke_args[0][1].content
+    assert "Steps already executed (most recent first):" in human_content
+    assert "(no steps executed yet)" in human_content
+    # No history lines rendered.
+    assert "[1]" not in human_content
+    assert "-> success" not in human_content
+
+
+# ---------- J2: success-step rendering (subsumes J5 args check) ----------
+
+
+def test_planner_human_message_renders_success_step():
+    """J2/J5: a success step renders as `[N] tool(args) -> success`."""
+    response = AIMessage(content="", tool_calls=[])
+    stub = StubLLM(response)
+    state = _initial_state(goal="say hello")
+    state["step_results"] = [
+        {
+            "tool": "chat",
+            "success": True,
+            "data": {"sent": True, "message": "hello"},
+            "error": None,
+            "duration_ms": 0.5,
+        }
+    ]
+    state["plan"] = [{"tool_name": "chat", "args": {"message": "hello"}}]
+
+    planner_node(state, llm=stub)
+
+    human_content = stub.invoke_args[0][1].content
+    assert "[1] chat(message='hello') -> success" in human_content
+    assert "(no steps executed yet)" not in human_content
+
+
+# ---------- J3: failure-step rendering ----------
+
+
+def test_planner_human_message_renders_failure_step():
+    """J3: a failed step renders as `[N] tool(args) -> error: <CODE> "<MSG>"`."""
+    response = AIMessage(content="", tool_calls=[])
+    stub = StubLLM(response)
+    state = _initial_state(goal="get oak logs")
+    state["step_results"] = [
+        {
+            "tool": "mine",
+            "success": False,
+            "data": None,
+            "error": {
+                "code": "E_NOT_FOUND",
+                "message": "oak_log not in range",
+            },
+            "duration_ms": 1.2,
+        }
+    ]
+    state["plan"] = [{"tool_name": "mine", "args": {"target": "oak_log", "count": 1}}]
+
+    planner_node(state, llm=stub)
+
+    human_content = stub.invoke_args[0][1].content
+    expected = (
+        "[1] mine(target='oak_log', count=1) -> error: "
+        'E_NOT_FOUND "oak_log not in range"'
+    )
+    assert expected in human_content
+    assert "(no steps executed yet)" not in human_content
+
+
+# ---------- J4: truncation to last 10 with omission hint ----------
+
+
+def test_planner_human_message_truncates_long_history():
+    """J4: 12 steps render as last 10 (most-recent-first) + omission hint."""
+    response = AIMessage(content="", tool_calls=[])
+    stub = StubLLM(response)
+
+    step_results: list[dict] = []
+    plan: list[dict] = []
+    for i in range(1, 13):
+        # Alternate tools so the rendered lines vary, making substring
+        # checks meaningful.
+        if i % 2 == 0:
+            step_results.append(
+                {
+                    "tool": "chat",
+                    "success": True,
+                    "data": None,
+                    "error": None,
+                    "duration_ms": 0.1,
+                }
+            )
+            plan.append({"tool_name": "chat", "args": {"message": f"m{i}"}})
+        else:
+            step_results.append(
+                {
+                    "tool": "navigate",
+                    "success": True,
+                    "data": None,
+                    "error": None,
+                    "duration_ms": 0.1,
+                }
+            )
+            plan.append(
+                {
+                    "tool_name": "navigate",
+                    "args": {"x": i, "y": 64, "z": i},
+                }
+            )
+
+    state = _initial_state(goal="long history")
+    state["step_results"] = step_results
+    state["plan"] = plan
+
+    planner_node(state, llm=stub)
+
+    human_content = stub.invoke_args[0][1].content
+    # Omission hint shows count of dropped entries.
+    assert "... (2 earlier steps omitted) ..." in human_content
+    # Most recent and oldest visible entries are rendered.
+    assert "[12]" in human_content
+    assert "[3]" in human_content
+    # Truncated indices are absent.
+    assert "[2]" not in human_content
+    assert "[1]" not in human_content
+    # Omission hint appears BEFORE the most-recent row.
+    omit_idx = human_content.index("... (2 earlier steps omitted) ...")
+    twelve_idx = human_content.index("[12]")
+    assert omit_idx < twelve_idx
+
+
+# ---------- J6: system prompt frozen ----------
+
+
+_FROZEN_SYSTEM_PROMPT = (
+    "You are the Planner for an autonomous Minecraft agent. The user gives a goal in natural language. You decide which ONE tool to call next to advance the goal, then return that tool call.\n"  # noqa: E501
+    "\n"
+    "You will see a list of steps already executed in this session (most recent first), each with the tool name, the args you chose last time, and the outcome. Use this history together with the bot's current state to recognize when the goal is already satisfied — in that case, return no tool call (you may include a brief textual confirmation). Do not repeat a tool call that already succeeded and accomplished the goal.\n"  # noqa: E501
+    "\n"
+    "The six available tools are bound to this conversation via the function-calling interface; use them. Do not narrate, do not plan multiple steps ahead, and do not return multiple tool calls — return exactly one tool call (or none)."  # noqa: E501
+)
+
+
+def test_system_prompt_matches_frozen_text():
+    """J6: _SYSTEM_PROMPT equals the three-paragraph frozen text byte-for-byte."""
+    assert _SYSTEM_PROMPT == _FROZEN_SYSTEM_PROMPT
 
 
 # ---------- P7/P8: state immutability and identity ----------
