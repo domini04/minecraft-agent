@@ -10,6 +10,8 @@
     "lint:fix": "eslint src/ --fix",
     "test:smoke": "node test/smoke/run.js",
     "test:smoke:keep": "node test/smoke/run.js --keep-world",
+    "test:smoke:brain": "node test/smoke/run-with-brain.js",
+    "test:smoke:brain:keep": "node test/smoke/run-with-brain.js --keep-world",
     "dev:up": "node test/smoke/dev-up.js",
     "dev:down": "node test/smoke/dev-up.js --down"
   },

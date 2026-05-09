@@ -1,8 +1,8 @@
 # Current Session Progress
 
-**Last Updated**: 2026-05-02
-**Current Phase**: Phase 1 ✅ + Phase 2 ✅ complete; Phase 3 next
-**Current Stage**: Phase 2 acceptance gate (live smoke 6/6) PASSED at run 7
+**Last Updated**: 2026-05-10
+**Current Phase**: Phases 1–3 ✅ complete; Phase 4 next
+**Current Stage**: Phase 3 acceptance gate cleared — live brain smoke `npm run test:smoke:brain` PASS
 
 ---
 
@@ -64,30 +64,54 @@ These are exactly the kind of bugs unit tests with mocks cannot catch. Live smok
 
 ---
 
+### Phase 3 — Brain v1 (Planner + Executor on LangGraph) ✅
+
+Acceptance gate (Sprint 3i) cleared on 2026-05-10. Live single-step run:
+
+```
+python -m src "say hello in chat"
+→ iter 1: planner picks chat(message="hello") → bot says hello in MC
+→ iter 2: planner sees chat in step history → returns no tool call → graph stops
+→ CLI exit 0; ~19s wall time; 2 Gemini calls (~$0.001)
+```
+
+| # | What | Commit |
+|---|---|---|
+| 3a | Brain Phase 3 deps | `23453b2` |
+| 3b | AgentState (Phase-3 subset) + factory | `531b55e` |
+| 3c-new | Shared JSON Schemas + body migration to ajv | `a19fd8f` |
+| 3d-new | Brain loader, Pydantic models, ToolResult, PlannerOutput | `653ca4c` |
+| 3e | Planner node + provider-agnostic LLM factory | `5acf4cb` |
+| 3f | Executor node with defensive error handling | `1588deb` |
+| 3g | LangGraph wiring with stop edges | `50460c3` |
+| 3h | CLI entry `python -m src "<goal>"` | `5c41bf7` |
+| 3j | Planner uses step history (acceptance prerequisite) | `34ef7ef` |
+| 3i | Live brain smoke harness + acceptance gate | (this commit) |
+
+---
+
 ## Test Counts
 
-- **119 unit tests** passing (jest 8 suites + pytest)
-- **6 live smoke scenarios** passing (deterministic, automated)
+- **148 body jest tests** passing (9 suites — adds `validate_params` post-3c-new)
+- **102 brain pytest tests** passing (Phase 3 nodes, graph, models, CLI; all stub-based)
+- **6 deterministic body smoke scenarios** passing (`npm run test:smoke`)
+- **1 live brain smoke scenario** passing (`npm run test:smoke:brain` — real Gemini + live MC)
 
 ---
 
 ## Resume Point
 
-Phase 2 complete and verified. Next: **Phase 3 — Brain v1 (Planner + Executor on LangGraph).**
+Phase 3 complete. Next: **Phase 4 — Knowledge (SOP library + tag-based Guide Retriever).**
 
-Phase 3 work involves:
-- Add LangGraph + LangChain to `brain/pyproject.toml`
-- Implement Planner node: prompts the LLM with goal + bot state, returns next tool call
-- Implement Executor node: dispatches the tool via `BodyClient.execute()`, captures result
-- Implement state schema (matches `docs/AGENT_STATE.md`)
-- LLM provider: Gemini 3 Flash (model-agnostic via LangChain)
-- Single-step proof: agent goal "navigate to 100,64,100 then chat hello" succeeds
+Open follow-ups (low priority, deferrable):
+- `Result:` line cosmetically renders Gemini 3.x structured-content list — extract `.text` for plain display.
+- `LangChainPendingDeprecationWarning` from langgraph's import surfaces on stderr; silence at brain entry.
+- In-world chat control pane (Decision 28) deferred to Phase 3.5 / Phase 8.
 
 ---
 
 ## Phases ahead
 
-3. Brain v1 (Planner + Executor on LangGraph)
 4. Knowledge (SOP + Guide Retriever)
 5. Resilience (Reflexion + retries)
 6. Construction (stretch)
