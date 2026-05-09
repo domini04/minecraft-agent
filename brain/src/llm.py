@@ -7,7 +7,7 @@ Per Decision 22, all LLM imports go through ``init_chat_model`` -- no direct
 
 `.env` is loaded exactly once per process (lazy, on the first ``get_llm()``
 call) via ``python-dotenv``. The default model string is
-``google_genai:gemini-3-flash-preview`` and is overridable by either:
+``google_genai:gemini-3.1-flash-lite`` and is overridable by either:
 
 * the ``BRAIN_LLM_MODEL`` env var, or
 * the ``model`` keyword argument to ``get_llm`` (which wins over env).
@@ -36,7 +36,7 @@ _DOTENV_LOADED: bool = False
 
 # Single source of truth for the default provider:model string. Tests
 # reference this constant rather than hard-coding the literal.
-_DEFAULT_MODEL: str = "google_genai:gemini-3-flash-preview"
+_DEFAULT_MODEL: str = "google_genai:gemini-3.1-flash-lite"
 
 
 def get_llm(model: str | None = None) -> "BaseChatModel":

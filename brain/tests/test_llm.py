@@ -21,7 +21,7 @@ def reset_dotenv_flag(monkeypatch):
 
 
 def test_get_llm_default_model_string(monkeypatch, reset_dotenv_flag):
-    """L1: default resolves to ``google_genai:gemini-3-flash-preview``."""
+    """L1: default resolves to ``google_genai:gemini-3.1-flash-lite``."""
     monkeypatch.delenv("BRAIN_LLM_MODEL", raising=False)
     init_mock = MagicMock(return_value="SENTINEL_LLM")
     dotenv_mock = MagicMock()
@@ -31,7 +31,7 @@ def test_get_llm_default_model_string(monkeypatch, reset_dotenv_flag):
     llm_module.get_llm()
 
     init_mock.assert_called_once_with(
-        "google_genai:gemini-3-flash-preview", temperature=0
+        "google_genai:gemini-3.1-flash-lite", temperature=0
     )
 
 

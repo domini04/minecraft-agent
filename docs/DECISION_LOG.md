@@ -568,7 +568,7 @@ app.listen(PORT, HOST);
 
 **Implementation rule**: All LLM imports go through `langchain.chat_models.init_chat_model`. No `from langchain_google_genai import ...` outside a single optional provider-resolution module. `.env` loaded once at the brain entry point (CLI or future control-plane server), not per-module.
 
-**Decision**: `init_chat_model("google_genai:gemini-3-flash-preview", ...)` for v1, with `GEMINI_API_KEY` loaded from project-root `.env` via `python-dotenv`. Provider string lives in config; no provider-specific code paths.
+**Decision**: `init_chat_model("google_genai:gemini-3.1-flash-lite", ...)` for v1, with `GEMINI_API_KEY` loaded from project-root `.env` via `python-dotenv`. Provider string lives in config; no provider-specific code paths. (Default updated 2026-05-10 from the placeholder `gemini-3-flash-preview` after verifying the actual available model id.)
 
 ---
 
