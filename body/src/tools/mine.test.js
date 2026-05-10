@@ -1,11 +1,32 @@
 const mine = require('./mine');
+const {
+  selectMineTarget,
+  classifyBlock,
+  TIER_LATERAL_OR_ABOVE,
+  TIER_BELOW_NOT_SUPPORT,
+  TIER_SUPPORT,
+} = require('./mine');
+const vec3 = require('vec3');
 
 describe('mine tool', () => {
   const mockBlock = (name = 'oak_log', pos = { x: 5, y: 64, z: 5 }) =>
     ({ name, position: pos });
 
+  // --- Sprint 3l mock-factory shim (TODO-6 path 1) ---
+  //
+  // The mining loop now uses bot.findBlocks (plural) + bot.blockAt instead of
+  // bot.findBlock directly. To keep the existing T1..T13 assertions intact —
+  // including those asserting on `mockBot.findBlock.mock.calls[0][0]` — we
+  // route findBlocks/blockAt through the existing findBlock jest.fn so each
+  // logical iteration still records exactly one findBlock call with the same
+  // opts shape (maxDistance preserved; the additional `count` field is
+  // ignored by the assertions).
   const makeMockBot = () => {
     let targetCount = 0;
+    // Map block-position-reference → block, populated as findBlocks delegates
+    // to the underlying findBlock and used by blockAt to resolve back.
+    const posToBlock = new Map();
+
     const bot = {
       registry: { blocksByName: { oak_log: { id: 17, name: 'oak_log' } } },
       findBlock: jest.fn(),
@@ -15,8 +36,43 @@ describe('mine tool', () => {
       inventory: {
         items: jest.fn(() => Array(targetCount).fill({ name: 'oak_log', count: 1 })),
       },
-      entity: { position: { x: 5, y: 64, z: 5 } },
     };
+
+    // findBlocks shim: delegate to findBlock, return [position] array (or []).
+    bot.findBlocks = jest.fn((opts) => {
+      const block = bot.findBlock(opts);
+      if (!block) return [];
+      posToBlock.set(block.position, block);
+      return [block.position];
+    });
+
+    // blockAt shim: return whatever findBlocks→findBlock yielded for that pos.
+    // Falls back to a synthesized block to keep mid-loop progress sane if a
+    // future test ever passes an unmapped position.
+    bot.blockAt = jest.fn((pos) => {
+      if (posToBlock.has(pos)) return posToBlock.get(pos);
+      return { name: 'oak_log', position: pos };
+    });
+
+    // entity.position must support .floored() (vec3) because selectMineTarget
+    // calls bot.entity.position.floored(). Wrap any assignment with vec3 so
+    // tests that do `mockBot.entity.position = { x, y, z }` keep working.
+    const entity = {};
+    let _pos = vec3(5, 64, 5);
+    Object.defineProperty(entity, 'position', {
+      get() { return _pos; },
+      set(v) {
+        if (v && typeof v.floored === 'function') {
+          _pos = v;
+        } else {
+          _pos = vec3(v.x, v.y, v.z);
+        }
+      },
+      configurable: true,
+      enumerable: true,
+    });
+    bot.entity = entity;
+
     // Expose counter mutator for tests that override collect.mockImplementation
     bot._bumpTarget = () => { targetCount += 1; };
     return bot;
@@ -288,5 +344,115 @@ describe('mine tool', () => {
 
     expect(mockBot.findBlock).toHaveBeenCalledTimes(3);
     expect(mockBot.collectBlock.collect).toHaveBeenCalledTimes(3);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Sprint 3l: tier-based block selection tests
+// ---------------------------------------------------------------------------
+
+describe('mine tool — tier selector', () => {
+  // Compact mock bot for direct selectMineTarget tests. Bot stands at
+  // (5.0, 70.0, 5.0) so botFloor = (5, 70, 5) and the support block is at
+  // (5, 69, 5) per the locked predicate `botFloor.y - 1`.
+  const makeTierBot = (candidates) => ({
+    findBlocks: jest.fn(() => candidates),
+    blockAt: jest.fn((pos) => ({ name: 'oak_log', position: pos })),
+    entity: { position: vec3(5.0, 70.0, 5.0) },
+  });
+
+  const eq = (a, b) => a.x === b.x && a.y === b.y && a.z === b.z;
+
+  it('tier-T1: support + 2 lateral at dist 2 → picks one of the lateral', () => {
+    const support = vec3(5, 69, 5);          // Tier 2
+    const lateralA = vec3(7, 70, 5);         // Tier 0, dist 2
+    const lateralB = vec3(5, 70, 7);         // Tier 0, dist 2
+    const bot = makeTierBot([support, lateralA, lateralB]);
+    const result = selectMineTarget(bot, 17, 32);
+    expect(result).not.toBeNull();
+    expect(eq(result, support)).toBe(false);
+    expect(eq(result, lateralA) || eq(result, lateralB)).toBe(true);
+  });
+
+  it('tier-T2: only support exists → returns the support', () => {
+    const support = vec3(5, 69, 5);
+    const bot = makeTierBot([support]);
+    const result = selectMineTarget(bot, 17, 32);
+    expect(result).not.toBeNull();
+    expect(eq(result, support)).toBe(true);
+  });
+
+  it('tier-T3: lateral at dist 5, below-not-support at dist 5 → lateral wins', () => {
+    const lateral = vec3(5, 70, 10);         // Tier 0, dist 5
+    const belowNotSupport = vec3(10, 69, 5); // Tier 1, dist sqrt(26) ≈ 5.099
+    const bot = makeTierBot([lateral, belowNotSupport]);
+    const result = selectMineTarget(bot, 17, 32);
+    expect(eq(result, lateral)).toBe(true);
+  });
+
+  it('tier-T4: lateral at dist 10, below-not-support at dist 5 → lateral still wins', () => {
+    const lateral = vec3(5, 70, 15);         // Tier 0, dist 10 → score 10
+    const belowNotSupport = vec3(10, 69, 5); // Tier 1, dist ≈ 5.099 → score ≈ 1005.099
+    const bot = makeTierBot([lateral, belowNotSupport]);
+    const result = selectMineTarget(bot, 17, 32);
+    expect(eq(result, lateral)).toBe(true);
+  });
+
+  it('tier-T5: two lateral candidates → closer one wins', () => {
+    const close = vec3(8, 70, 5);            // Tier 0, dist 3
+    const far = vec3(15, 70, 5);             // Tier 0, dist 10
+    const bot = makeTierBot([close, far]);
+    const result = selectMineTarget(bot, 17, 32);
+    expect(eq(result, close)).toBe(true);
+  });
+
+  it('tier-T6: above-dist-10 vs lateral-dist-2 → lateral wins (within Tier 0)', () => {
+    const above = vec3(5, 80, 5);            // Tier 0, dist 10
+    const lateral = vec3(7, 70, 5);          // Tier 0, dist 2
+    const bot = makeTierBot([above, lateral]);
+    const result = selectMineTarget(bot, 17, 32);
+    expect(eq(result, lateral)).toBe(true);
+  });
+
+  it('tier-T7: empty candidate list → returns null', () => {
+    const bot = makeTierBot([]);
+    const result = selectMineTarget(bot, 17, 32);
+    expect(result).toBeNull();
+  });
+
+  it('tier-classify-T8: classifyBlock matrix', () => {
+    const botFloor = { x: 5, y: 70, z: 5 };
+    // Support: directly under feet (botFloor.y - 1)
+    expect(classifyBlock({ x: 5, y: 69, z: 5 }, botFloor)).toBe(TIER_SUPPORT);
+    // Below-not-support: same y as support but different x
+    expect(classifyBlock({ x: 4, y: 69, z: 5 }, botFloor)).toBe(TIER_BELOW_NOT_SUPPORT);
+    // Below-not-support: deeper than support, same x/z
+    expect(classifyBlock({ x: 5, y: 68, z: 5 }, botFloor)).toBe(TIER_BELOW_NOT_SUPPORT);
+    // Lateral: same y as feet
+    expect(classifyBlock({ x: 7, y: 70, z: 5 }, botFloor)).toBe(TIER_LATERAL_OR_ABOVE);
+    // Above
+    expect(classifyBlock({ x: 5, y: 71, z: 5 }, botFloor)).toBe(TIER_LATERAL_OR_ABOVE);
+    // Bot's own occupied block (same as feet floor) — Tier 0 by edge-case rule
+    expect(classifyBlock({ x: 5, y: 70, z: 5 }, botFloor)).toBe(TIER_LATERAL_OR_ABOVE);
+  });
+
+  it('tier-float-boundary-T9: bot at y=70.0 exactly → support is (x, 69, z)', () => {
+    // With Option-A (no -0.5 offset), feet-position 70.0 floors to 70, and
+    // the support predicate `botFloor.y - 1` resolves to y = 69. A candidate
+    // at (5, 69, 5) must therefore be classified as TIER_SUPPORT.
+    const bot = {
+      findBlocks: jest.fn(() => [vec3(5, 69, 5)]),
+      blockAt: jest.fn((pos) => ({ name: 'oak_log', position: pos })),
+      entity: { position: vec3(5.0, 70.0, 5.0) },
+    };
+    const result = selectMineTarget(bot, 17, 32);
+    expect(result).not.toBeNull();
+    // Confirm via classifyBlock directly using the same floored position.
+    const botFloor = bot.entity.position.floored();
+    expect(classifyBlock({ x: 5, y: 69, z: 5 }, botFloor)).toBe(TIER_SUPPORT);
+    // And the selector returned that support block (only candidate).
+    expect(result.x).toBe(5);
+    expect(result.y).toBe(69);
+    expect(result.z).toBe(5);
   });
 });
