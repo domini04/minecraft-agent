@@ -1,219 +1,254 @@
-# Session Handoff — Phase 3 Kickoff
+# Session Handoff — Phase 3 Complete
 
-**Created**: 2026-05-02 (end of session that completed Phases 1+2)
-**Next phase**: Phase 3 — Brain v1 (Planner + Executor on LangGraph)
-**Branch**: `main` (clean working tree)
-**Latest commit**: `04f9e8a` docs(todo): Phase 2 complete — live smoke 6/6 at run 7
+**Created**: 2026-05-10 (end of Phase 3 session)
+**Branch**: `main` (clean working tree, 4 commits ahead of `origin/main`)
+**Latest commit**: `116dfaf` fix(body/mine): tier-scored block selection prevents dig-down trap
+**Next phase**: **Phase 4 — Knowledge** (SOP library + tag-based Guide Retriever)
+
+Open this file first thing next session. Then read `docs/LEDGER.md` for the doc index, `docs/DECISION_LOG.md` (decisions 1–28), and `docs/TODO.md` (current sprint trail).
 
 ---
 
 ## TL;DR
 
-Phases 0, 1, 2 are complete. The body process exposes a working `/execute` RPC with all six tools (chat, get_bot_status, navigate, mine, craft, place_block) verified against a **live Minecraft server** by an automated smoke harness (`npm run test:smoke`). The brain side has a working `BodyClient` (Python) that POSTs to `/execute`. **No LLM, no LangGraph, no planner yet** — that is Phase 3.
+Phases 0, 1, 2, **and 3** are complete. The brain has a working LangGraph planner→executor loop driven by real Gemini 3.1 Flash Lite calls; goals enter via CLI (`python -m src "<goal>"`) and the bot acts on a live Minecraft server. The Phase 3 acceptance gate (`npm run test:smoke:brain`) passed end-to-end with a single-step goal.
 
-Open this file first thing next session. Then read `docs/LEDGER.md` for the doc index.
+This session also added two follow-ups beyond the original plan:
+- **Sprint 3k** — Pre-action chat narration: bot announces what it's about to do in MC chat before each non-chat step.
+- **Sprint 3l** — Mine-tool fix: tier-scored block selection prevents the dig-down trap observed in live testing.
+
+Phase 4 is the natural next phase — adding the SOP library + tag-based Guide Retriever that lets the agent execute multi-step goals like "get me a stone pickaxe."
 
 ---
 
 ## State Snapshot
 
+### Phase 3 sprint trail (this session)
+
+| Sprint | Commit | What |
+|---|---|---|
+| 3a | `23453b2` | Brain Phase 3 deps (langgraph, langchain, langchain-google-genai, python-dotenv) |
+| 3b | `531b55e` | `AgentState` TypedDict (Phase-3 subset) + `make_initial_state` factory + `MAX_ITERATIONS=10` |
+| 3c-new | `a19fd8f` | Shared JSON Schemas at `shared/tool-schemas/` + body migration to ajv (single source of truth) |
+| 3d-new | `653ca4c` | Brain loader: hand-written Pydantic v2 args models, drift guard, `get_tools()`, `PlannerOutput`, `ToolResult` |
+| 3e | `5acf4cb` | Planner node + provider-agnostic LLM factory (`get_llm` via `init_chat_model`) |
+| 3f | `1588deb` | Executor node with three defensive error paths + bot-status refresh |
+| 3g | `50460c3` | LangGraph `StateGraph` wiring with two conditional edges (stop on result-set or cap-exhausted) |
+| 3h | `5c41bf7` | CLI entry: `python -m src "<goal>"` with `--model`, `--body-url`, `-v`, exit codes |
+| 3j | `34ef7ef` | History-aware planner: human message includes step_results so the LLM can detect goal completion (acceptance gate prerequisite) |
+| 3i | `f7c54bf` | Live brain smoke harness + Phase 3 acceptance gate cleared |
+| 3k | `40755c7` | Pre-action chat narration (post-Phase-3 polish for demos) |
+| 3l | `116dfaf` | Mine tool: tier-scored block selection (post-Phase-3 fix from live observations) |
+
+Plus session housekeeping:
+- `ba2a2d2` — chore: project Bash permission allowlist
+- `9dc92ee` — docs: Decisions 22–28 logged
+- `42aae25` — chore: gitignore `uv.lock`
+- `078b94e` — chore: pin default LLM to `gemini-3.1-flash-lite`
+
 ### Code
 
-- **Body** (Node.js / Express / Mineflayer at `body/`):
-  - `body/src/server.js` — Express entry point.
-  - `body/src/app.js` — `GET /status` (returns live bot state) + `POST /execute` (RPC dispatcher with 4-min timeout, 6 tool stubs registered).
-  - `body/src/bot.js` — Mineflayer bot creation; loads `mineflayer-pathfinder` + `mineflayer-collectblock` plugins; sets default `Movements` on spawn.
-  - `body/src/tools/{chat,get_bot_status,navigate,mine,craft,place_block}.js` — all six implementations.
-  - `body/src/utils/{response,timeout}.js` — envelope builders + `withTimeout`.
-  - `body/test/smoke/` — full live-server smoke harness (see "Smoke harness" below).
-- **Brain** (Python / requests at `brain/`):
-  - `brain/src/body_client.py` — `BodyClient` class with `get_status()` and `execute(tool, params=None)`. `execute()` uses 300s (5-min) timeout per Decision 19. Raises on HTTP 4xx/5xx (`raise_for_status`). Returns full JSON envelope on 200.
-  - `brain/tests/test_body_client.py` — pytest, all mocked.
+**Brain** (`brain/`):
+- `src/state.py` — `AgentState` TypedDict (7 Phase-3 fields), `make_initial_state`, `MAX_ITERATIONS=10`.
+- `src/models.py` — `ErrorEnvelope`, `ToolResult` (with `from_envelope` classmethod + cross-field invariant), `PlannerOutput` discriminated union.
+- `src/tools/loader.py` — six `<Tool>Args` Pydantic models, drift guard, `get_tools()` returning LangChain `StructuredTool` list ready for `bind_tools()`.
+- `src/llm.py` — `get_llm(model=None)` via `init_chat_model`. `_DOTENV_LOADED` guard. Default `google_genai:gemini-3.1-flash-lite`.
+- `src/nodes/planner.py` — `planner_node(state, *, llm=None)`. Frozen 3-paragraph system prompt. Human message includes goal, bot_status, **steps history** (Sprint 3j).
+- `src/nodes/executor.py` — `executor_node(state, *, body_client=None, announce: bool | None = None)`. Three error paths (out-of-range, malformed envelope, body raise). Bot-status refresh on `get_bot_status` success. Pre-action chat narration via `_format_announcement` (Sprint 3k).
+- `src/graph.py` — `build_graph(llm=None, body_client=None, announce=None)` and `run_goal(goal, ...)`. Two conditional edges enforce stop conditions.
+- `src/__main__.py` — CLI entry. argparse flags: `--model`, `--body-url`, `--max-iterations` (no-op stderr warning), `-v`, `--no-announce`. Exit codes: 0 (goal complete + all steps success), 1 (incomplete), 2 (caught exception).
+
+**Body** (`body/`):
+- `src/utils/validate_params.js` — ajv-based validator helper using shared JSON Schemas. Translation tables map ajv errors back to legacy per-tool message strings (Sprint 3c-new).
+- `src/tools/mine.js` — tier-scored block selection: `classifyBlock` / `scoreCandidate` / `selectMineTarget` with `TIER_OFFSET=1000` (Sprint 3l).
+- All other body code unchanged from Phase 2.
+
+**Shared**:
+- `shared/tool-schemas/{chat,get_bot_status,navigate,mine,craft,place_block}.json` + `index.json` — Draft 2020-12 JSON Schemas. Single source of truth consumed by both body (ajv validator) and brain (Pydantic models via loader).
 
 ### Tests
 
-- **119 unit tests** passing across 8 jest suites + pytest. Run from `body/`: `npm test`. Run from `brain/`: `pytest`.
-- **6 live smoke scenarios** passing. Run from `body/`: `npm run test:smoke`. See "Smoke harness" below.
-
-### Dependencies (already installed)
-
-- `body/package.json`: `express ^4.21.0`, `mineflayer ^4.20.1`, `mineflayer-pathfinder ^2.4.5`, `mineflayer-collectblock ^1.6.0`. Dev: `jest`, `supertest`.
-- `brain/pyproject.toml`: `requests >=2.31.0`. Dev: `pytest >=8.0.0`. Configured: `ruff` (NOT installed; lint not required).
+- **Body jest**: 157/157 (9 suites). Includes 29 ajv `validate_params` tests + 9 mine tier-selection tests.
+- **Brain pytest**: 120/120. All stub-based — no LLM calls, no network.
+- **Body live smoke** (`npm run test:smoke`): 6 deterministic tool scenarios passing.
+- **Brain live smoke** (`npm run test:smoke:brain`): single-step goal "say hello in chat" passing end-to-end against real Gemini + live MC.
 
 ### Live Minecraft server
 
-- Path: `~/minecraft-server/` (Java 21, MC 1.20.4).
-- Config (`server.properties`): port 25565, online-mode false, peaceful, max-players 2, level-seed `minecraft-agent-dev`, gamemode survival.
-- `agent` is op'd in `ops.json` (level 4) — required for `/give`, `/tp`, `/setblock` in smoke scenarios.
-- The smoke harness manages MC server lifecycle automatically; no manual start needed for `npm run test:smoke`.
+- Path: `~/minecraft-server/` (Java 21, MC 1.20.4, port 25565, `online-mode=false`, peaceful, fixed seed `minecraft-agent-dev`, gamemode survival).
+- `agent` op'd at level 4.
+- Smoke harnesses manage MC lifecycle automatically; for manual demos use `npm run dev:up` from `body/`.
+
+### Decisions added this phase (22–28)
+
+See `docs/DECISION_LOG.md`:
+- **22** — LLM via `init_chat_model` + `python-dotenv`, provider-agnostic (default `google_genai:gemini-3.1-flash-lite`).
+- **23** — Tool binding via `bind_tools()` (JSON schema, native function-calling) — reliability priority.
+- **24** — Phase 3 v1 scope: single-step goals, fixed `MAX_ITERATIONS=10` cap.
+- **25** — `AgentState` v1 = Phase-3 subset (7 fields); `guide`/`errors`/`retry_count` deferred to Phases 4/5.
+- **26** — Tool schema source-of-truth: shared JSON Schema at `shared/tool-schemas/` (NOT hand-mirrored).
+- **27** — Pydantic models for tool args + `PlannerOutput` + `ToolResult` (typed envelopes everywhere).
+- **28** — In-world chat control pane deferred to Phase 3.5 / Phase 8 (predefined commands, always-on brain HTTP server).
 
 ---
 
 ## What's working end-to-end
 
 ```
-[Brain Python] BodyClient.execute("chat", {"message":"hi"})
-   │
-   │  POST http://127.0.0.1:3000/execute
-   │  body: {"tool":"chat","params":{"message":"hi"}}
-   │  timeout: 300s
-   ▼
-[Body Node] /execute dispatcher (app.js)
-   │
-   │  validates tool name; dispatches to chat(params, bot)
-   ▼
-[Body Node] chat tool (tools/chat.js)
-   │
-   │  validates, calls bot.chat("hi")
-   ▼
-[Mineflayer] sends chat packet to server
-   │
-   │  returns {sent: true, message: "hi"}
-   ▼
-[Body Node] wraps in envelope: {success: true, data: {...}, tool: "chat", duration_ms: 0.5}
+[User] python -m src "say hello in chat"
    │
    ▼
-[Brain Python] returns the envelope dict to caller
+[Brain CLI] argparse → run_goal → make_initial_state → graph.invoke
+   │
+   ▼
+[Planner node] reads goal+bot_status+step_history → bind_tools(get_tools())
+                → real Gemini call → AIMessage with tool_calls
+   │ appends {"tool_name": "chat", "args": {"message": "hello"}} to state.plan
+   ▼
+[Conditional edge] current_step < len(plan) → executor
+   │
+   ▼
+[Executor node] (announce skipped — tool is chat itself)
+                → BodyClient.execute("chat", {"message": "hello"})
+   │
+   ▼
+[Body /execute] dispatcher → ajv validate → chat.js → bot.chat("hello")
+   │
+   ▼
+[Mineflayer] sends chat packet to live MC server
+   │
+   ▼
+[Executor] coerces envelope to ToolResult → appends to step_results → advances current_step
+   │
+   ▼
+[Conditional edge] iteration_count<10 AND no result → planner
+   │
+   ▼
+[Planner iter 2] sees "[1] chat(message='hello') -> success" in steps history
+                → returns AIMessage with no tool calls + content "The goal has already been satisfied."
+   │ sets state.result, no plan append
+   ▼
+[Conditional edge] current_step >= len(plan) → END
+   │
+   ▼
+[CLI] formats summary, exit 0
 ```
 
-All 6 tools follow this path. Live verified.
+Live smoke artifact captured at `body/test/smoke/results/last-brain-run.json` (gitignored).
 
 ---
 
 ## Architecture invariants (DO NOT VIOLATE)
 
-1. **Brain/Body split is load-bearing.** Brain (Python/LangGraph) decides; Body (Node/Mineflayer) executes. They communicate ONLY over the localhost HTTP bridge. The single endpoint is `POST /execute`. Decisions 15–21 in `docs/DECISION_LOG.md` are frozen.
-
-2. **Deterministic tooling.** The LLM does not hold Minecraft mechanics. Tools are human-written, parameter-validated, and return well-typed envelopes. Adding LLM reasoning to a tool body is a project-thesis violation.
-
-3. **Tool envelope shape (frozen):**
-   - Success: `{success: true, data: <tool-specific>, tool: <name>, duration_ms: <number>}`
-   - Failure: `{success: false, error: {code, message, context?}, tool, duration_ms}`
-   - HTTP status is always 200 for tool results; 400 for protocol errors (malformed request, unknown tool); 500 for unhandled exceptions.
-
-4. **Out of scope for tools (Phase 5/6 work, do NOT add now):** retry logic, partial-success envelopes, ToolError class, per-tool LangSmith hooks, tool durability.
+1. **Brain/Body split**: brain decides, body executes. Communication only over the localhost HTTP bridge (`POST /execute`). Decisions 5, 15–21 are frozen.
+2. **Deterministic tooling**: tools are human-written, parameter-validated, return well-typed envelopes. No LLM reasoning inside tool bodies.
+3. **Single source of truth for tool schemas**: `shared/tool-schemas/*.json` (Draft 2020-12). Body validates with ajv; brain generates Pydantic models + LangChain tools. Adding a tool means editing JSON, not duplicating contracts.
+4. **Provider-agnostic LLM**: all LLM imports go through `langchain.chat_models.init_chat_model`. No direct provider SDK imports outside `src/llm.py`.
+5. **State immutability** in graph nodes: shallow-copy input state, rebuild only changed fields. Never mutate input lists/dicts.
+6. **No-network test discipline**: lazy imports for `BodyClient`, `BaseChatModel`, etc. `from src.X import Y` from production code paths must NOT pull `requests`/`httpx`/`urllib3` into `sys.modules` at import time.
 
 ---
 
-## Smoke harness — `npm run test:smoke`
+## Open follow-ups (not blocking, deferrable)
 
-Located at `body/test/smoke/`. Fully automated end-to-end:
-
-1. Resets the world (`rm -rf world/ world_nether/ world_the_end/` in `~/minecraft-server`).
-2. Patches `ops.json` to op the bot.
-3. Spawns the MC server child process; waits for `Done (Xs)!` log line (default timeout 120s).
-4. Spawns the body server child process; waits for `[Bot] Spawned in world` AND `GET /status` returning `bot != null`.
-5. Runs 6 scenarios in order: `00-chat`, `01-get-bot-status`, `02-navigate`, `03-place-block`, `04-mine`, `05-craft`.
-6. Tears down body (SIGTERM), MC server (`stop\n` to stdin), removes PID file.
-7. Writes `body/test/smoke/results/last-run.json` with full per-scenario data.
-
-CLI flags:
-- `--keep-world` — skip world reset (faster iteration).
-- `--force-kill` — bypass orphan-detection refusal.
-- `--dry-run` — exercise harness without spawning MC (Tier 1 tests).
-- `--help` — usage.
-
-Other entry points:
-- `npm run dev:up` — start MC + body, foreground tail of combined logs prefixed `[mc]`/`[body]`, Ctrl-C tears both down.
-- `npm run dev:down` — kill running smoke processes via `.pids` file.
-- `npm run test:smoke:keep` — alias for `--keep-world`.
-
-Env vars: `MC_SERVER_DIR` (default `$HOME/minecraft-server`), `BOT_HOST`, `BOT_PORT`, `MC_HOST`, `MC_PORT`, `MC_USERNAME`, `SMOKE_MC_READY_TIMEOUT_MS`, `SMOKE_BOT_READY_TIMEOUT_MS`, `SMOKE_SCENARIO_TIMEOUT_MS`, `KEEP_WORLD`.
-
-See `body/test/smoke/README.md` for troubleshooting.
+| Item | Severity | Note |
+|---|---|---|
+| `Result:` line cosmetically renders Gemini 3.x's structured-content list (`[{type, text, extras}]`) | Low | ~5-line fix in `__main__.py`'s formatter to extract `.text`. Polish sprint. |
+| `LangChainPendingDeprecationWarning` from `langgraph.checkpoint.serde.jsonplus` shows up on stderr | Low | One `warnings.filterwarnings(...)` in brain entry. |
+| In-world chat control pane (Decision 28) | Deferred | Phase 3.5 or Phase 8. Predefined commands, always-on brain HTTP server. |
+| Pathfinder navigate occasional stuck-then-recover | Observed | Body-level pathfinder re-planning. Not a brain concern. May want bigger `thinkTimeout` budgets if it hurts demos. |
+| Float-boundary handling for mine support detection | Low | Sprint 3l Option-A picked literal `botFloor.y - 1`; the originally proposed `-0.5` offset was dropped after Planner traced through three position cases. May need revisit if observed mid-pathfinding. |
+| `--max-iterations` CLI flag is parsed but no-op | Low | Honoring would require modifying state.py's `MAX_ITERATIONS`. Stderr warning documents this. |
+| Eslint config doesn't recognize jest globals in `*.test.js` | Pre-existing | Body lint surfaces `describe/it/expect/jest is not defined` errors. Not introduced by Phase 3 work; predates this session. |
+| `AGENTS.md` at repo root — untracked | Decision pending | A subagent created this earlier (~35 lines, near-duplicate of `CLAUDE.md`, Codex/Cursor convention). Decide: keep as a tool-neutral instruction file, or delete. Currently sitting in working tree. |
 
 ---
 
-## Live-only defects discovered + fixed in iteration loop
+## Phase 4 — what to plan next session
 
-These are recorded because they're the kind of bugs that mocked unit tests cannot catch — kept here as **historical context for future tool authors** and as **examples of why live smoke matters**.
+### Goal
 
-1. **`place_block` silent revert** (Sprint 9, commit `e503698`). `bot.placeBlock()` resolves on packet ACK, not actual placement. Server can silently reject and revert via Block-Update packet that arrives after the promise. Fix: tool now reads `bot.blockAt(targetPos)` after a `VERIFY_SETTLE_MS` delay; throws `place_block: placement reverted by server` if the cell is still air or null.
+Add **SOPs** (Standard Operating Procedures) + a **Guide Retriever node** so the agent can execute multi-step goals like "get me a stone pickaxe" by retrieving a recipe-shaped plan template that the LLM follows step-by-step.
 
-2. **`mine` silent pickup-fail** (Sprint 10, commit `9eb524b`). `bot.collectBlock.collect()` resolves on dig completion, not pickup. Drop can despawn or pickup can race. Fix: tool tracks per-iteration inventory delta; throws `mine: collect resolved but inventory did not increase` if count didn't grow by 1.
+### Per Decision 4 + Decision 8
 
-3. **`navigate` GoalBlock + 5s thinkTimeout** (Sprint 11, commit `8839db1`). Pathfinder's default 5s thinkTimeout was too short for complex terrain; `GoalBlock` was too strict (bot stops on top of goal block, +1y). Fix: switched to `GoalNear(x, y, z, 1)`; bumped thinkTimeout to 20000ms with save-and-restore; env var `NAVIGATE_THINK_TIMEOUT_MS` overrides.
+- SOPs are semi-structured YAML files (one per goal class, e.g. `stone_pickaxe.yaml`).
+- Stored under `brain/src/sops/` (or similar — Phase 4 plan picks).
+- Each SOP has: `name`, `tags` (for retrieval), `requires` (input items), `steps` (ordered tool-call sequence with placeholders).
+- Retrieval is **tag-based keyword lookup** for v1 (NOT vector search). ChromaDB upgrade comes in Phase 7.
 
-These three fixes are in `body/src/tools/{place_block,mine,navigate}.js`. All have unit tests covering the new error paths.
+### State schema additions (per Decision 25)
 
----
+`AgentState` gains `guide: dict` field — populated by the Guide Retriever node, read by the Planner.
 
-## Phase 3 — Brain v1 (next session)
+### New graph topology
 
-### What it is
+```
+START → guide_retriever → planner → executor → planner → ... → END
+```
 
-Add a LangGraph-based agent that reads goals (natural language), plans tool calls via an LLM, executes them via the existing `BodyClient`, and loops until the goal is met or a stop condition fires.
+The `guide_retriever` is a new graph node. Sits before the planner. Reads `state.goal`, matches against the SOP tag index, populates `state.guide` with the matched SOP (or empty dict if no match — planner falls back to direct LLM reasoning).
 
-### Source-of-truth docs to read first
+### Sprints to plan (rough)
 
-1. `docs/LEDGER.md` — start here for doc index.
-2. `docs/TECHNICAL_BLUEPRINT.md` — Phase 3 high-level scope (Brain v1 = single-step Planner + Executor).
-3. `docs/AGENT_STATE.md` — LangGraph state schema (already designed).
-4. `docs/DECISION_LOG.md` — Decisions 1–21. Specifically:
-   - Decision 1: LangGraph as orchestration framework.
-   - Decision 4: Gemini 3 Flash as primary model, model-agnostic via LangChain.
-   - Decision 7: Error handling — 3 retries → report & stop.
-5. `docs/PROGRESSION_PLAN.md` — three-stage workflow (Understand → Design → Implement) for Phase 3.
+1. **4a** — SOP file format + a few seed SOPs (e.g. `oak_planks`, `crafting_table`, `wooden_pickaxe`, `stone`, `stone_pickaxe`).
+2. **4b** — `brain/src/sops/loader.py` + tag-based retrieval helper. Pure function: `find_sop(goal: str, sop_index) -> dict | None`.
+3. **4c** — `guide_retriever_node` + tests.
+4. **4d** — Update `_format_human_message` to include the matched SOP in the planner prompt.
+5. **4e** — Update graph wiring: insert `guide_retriever` before `planner` on the entry edge.
+6. **4f** — Live smoke for a multi-step goal (e.g. "craft 1 oak_planks" given a starting inventory) — Phase 4 acceptance gate.
 
-### Decisions still open (need user input at session start)
+Each sprint = one PGE loop per `memory/feedback_commit_cadence.md`.
 
-1. **Gemini API key**: do you have `GEMINI_API_KEY` ready? If not, set up auth first. Alternative: use a different LangChain-supported provider (OpenAI, Claude API, Ollama local) for the proof-of-concept.
-2. **Planner prompt strategy**: system prompt design, few-shot examples, tool schema description (JSON schema vs natural-language list).
-3. **Stop criteria**: goal-completion check vs fixed iteration cap vs LLM-self-reports-done. Recommend fixed cap (e.g., 10 steps) for v1; intelligent stop in Phase 5.
-4. **Initial scope**: single-step ("chat hello") or multi-step ("mine 5 oak_log → craft pickaxe")? Recommend **single-step first** to lock the harness end-to-end, then expand.
+### Decisions still to lock at Phase 4 kickoff
 
-### Recommended Phase 3 sprint order
-
-| # | Sprint | Files | Notes |
-|---|--------|-------|-------|
-| 3a | Add LangGraph + LangChain deps to `brain/pyproject.toml` | `brain/pyproject.toml` | Pure infra; no logic. |
-| 3b | Implement state schema (`AgentState` TypedDict) per `docs/AGENT_STATE.md` | `brain/src/state.py` (new), `brain/tests/test_state.py` | |
-| 3c | Implement Planner node (LLM call → tool spec) | `brain/src/nodes/planner.py`, tests | LLM mocked. |
-| 3d | Implement Executor node (calls `BodyClient.execute`) | `brain/src/nodes/executor.py`, tests | BodyClient mocked. |
-| 3e | Wire LangGraph graph: planner → executor → loop with stop condition | `brain/src/graph.py`, tests | |
-| 3f | CLI entry point: `python -m brain "navigate to 100,64,100 and chat hello"` | `brain/src/__main__.py` | |
-| 3g | Live smoke: agent achieves single-step goal end-to-end | extend `body/test/smoke/` or new `brain/test/smoke/` | The Phase 3 acceptance gate. |
-
-Each sprint = one PGE loop per the project's commit cadence (`memory/feedback_commit_cadence.md`).
-
----
-
-## Process & cadence (loaded from memory; restated for clarity)
-
-- **Decisions**: never make architectural decisions unilaterally. Present options + tradeoffs + recommendation; wait for explicit user approval. Routine technical choices within a frozen design ARE fine to make autonomously (auto-mode rule).
-- **Sprints**: each implementation sprint = one PGE (Planner-Generator-Evaluator) loop. Doc-only sprints don't need PGE.
-- **Commits**: only on PGE `[VERDICT:PASS]`. Atomic, scoped to the sprint's target files. Never `git add -A`. Use the project's commit-message style (`type(scope): subject` + body + Co-Authored-By trailer).
-- **Memory**: `memory/MEMORY.md` is the index; per-topic markdown files for feedback/project facts. See `feedback_commit_cadence.md`, `feedback_autonomy.md`, `feedback_phase2_cadence.md`.
-- **PGE harness sessions**: live in `.pge/<id>/` (gitignored). Each session has `state.json`, `plan.md`, `iteration-N/{generation,evaluation}.md`, `report.md`. Active session ID is timestamp-prefixed.
+1. **SOP storage shape**: one file per SOP, or one consolidated `index.yaml`? Lean toward one-file-per-SOP for git-friendliness.
+2. **Tag matching algorithm**: simple substring? Fuzzy? Generator picks; freeze in plan.
+3. **Variable substitution in steps**: e.g. an SOP step says `{"action": "mine", "target": "oak_log", "count": "{{count * 4}}"}` — does the brain do template expansion? Probably yes; spec the exact syntax in Phase 4 plan.
+4. **What happens when no SOP matches**: brain falls through to direct planner reasoning (Phase 3 behavior). Confirm.
+5. **Inventory pre-checks**: SOP `requires` block — does Guide Retriever verify inventory before populating `guide`, or does the planner / executor handle it? Lean toward planner.
 
 ---
 
 ## Quick smoke check at session start
 
-To verify the system is in the documented state:
-
 ```bash
-# Working tree should be clean
 cd /Users/yub/Desktop/Dev/Projects/minecraft-agent
+
+# Working tree should be clean
 git status
 
-# Latest commit should be 04f9e8a
+# Latest commit should be 116dfaf
 git log --oneline -1
 
-# Unit tests should be 119/119 green
-cd body && npm test
-cd ../brain && pytest
+# Tests should be green
+cd body && npm test           # 157 passed
+cd ../brain && pytest -q       # 120 passed
 
-# (Optional) Full live smoke — requires ~70s, MC server will start automatically
-cd ../body && npm run test:smoke
-# Expected: 6 PASS, last-run.json updated, processes cleaned up
+# (Optional) Live brain smoke — costs ~$0.001 in Gemini calls
+cd ../body && npm run test:smoke:brain
+# Expected: VERDICT: PASS (iterations=2)
 ```
 
 ---
 
 ## Pending session-end housekeeping
 
-- Background Minecraft server process: should already be stopped by the smoke harness's cleanup at end of run 7. To confirm: `pgrep -fl 'java.*server.jar'`. If still running, `kill <pid>`.
-- Background body process: same; should be down after smoke teardown.
+- Background MC server: stopped (`pgrep` confirmed clean at session end).
+- Background body process: stopped.
+- Stale `body/test/smoke/results/.pids` from earlier dev:up: removed at session end.
+- `AGENTS.md` at root: still present, untracked. User decision pending — see Open Follow-ups.
+- Memory at `~/.claude/projects/-Users-yub-Desktop-Dev-Projects-minecraft-agent/memory/` — Phase 3 decisions captured at `project_phase3_decisions.md`. May want to add a Phase 4 prep memo at next session start.
 
-No other state to clean up. Memory files are committed at `~/.claude/projects/-Users-yub-Desktop-Dev-Projects-minecraft-agent/memory/`.
+---
+
+## Files to touch first thing next session
+
+1. `HANDOFF.md` (this file) — read in full.
+2. `docs/LEDGER.md` — confirm doc index is current.
+3. `docs/TODO.md` — sprint trail + test counts + Phase 4 next-step pointer.
+4. `docs/DECISION_LOG.md` — Decisions 22–28 are the freshest; Phase 4 will likely add 29–3X.
+5. `docs/PROGRESSION_PLAN.md` — Phase 4 step list (probably needs a refresh against the sprint shape outlined above).
+6. `~/.claude/projects/-Users-yub-Desktop-Dev-Projects-minecraft-agent/memory/MEMORY.md` — quick context refresh.
+
+Phase 3 done. Ready for Phase 4 when you are.
