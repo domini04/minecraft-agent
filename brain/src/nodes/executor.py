@@ -34,6 +34,8 @@ imported inside the function body so importing this module doesn't pull
 
 from __future__ import annotations
 
+import os
+import sys
 from typing import TYPE_CHECKING
 
 from pydantic import ValidationError
@@ -45,8 +47,91 @@ if TYPE_CHECKING:
     from src.body_client import BodyClient
 
 
+# Tool name -> format string. BYTE-FROZEN per Sprint 3k plan §2.2.
+# Any tool not listed here (or ``chat``) yields ``None`` from
+# ``_format_announcement`` and is silently skipped.
+_ANNOUNCE_TEMPLATES: dict[str, str] = {
+    "get_bot_status": "Checking my status...",
+    "navigate": "Heading to ({x}, {y}, {z})...",
+    "mine": "Mining {count} {target}...",
+    "craft": "Crafting {count} {item}...",
+    "place_block": "Placing {block} at ({x}, {y}, {z})...",
+}
+
+# Env var values that DISABLE announcement (case-sensitive list per §2.4).
+_ANNOUNCE_DISABLE_VALUES = frozenset({"0", "false", "False", "FALSE", "no", "off"})
+
+
+def _resolve_announce(arg: bool | None) -> bool:
+    """Resolve the announce flag: explicit kwarg -> env -> default ON.
+
+    Args:
+        arg: The ``announce=`` kwarg passed to ``executor_node``. ``None``
+            means "fall through to env"; ``True``/``False`` is taken as-is.
+
+    Returns:
+        ``True`` when announcement should fire, ``False`` otherwise.
+    """
+    if arg is not None:
+        return arg
+    raw = os.environ.get("BRAIN_ANNOUNCE")
+    if raw is None:
+        return True
+    return raw not in _ANNOUNCE_DISABLE_VALUES
+
+
+def _format_announcement(step: dict) -> str | None:
+    """Render the chat announcement for a plan step, or ``None`` to skip.
+
+    Returns ``None`` when:
+
+    * the tool is ``chat`` (don't announce a chat with another chat), OR
+    * the tool is not in ``_ANNOUNCE_TEMPLATES`` (defensive -- planner's
+      validator already excludes unknown tools).
+
+    For ``navigate`` / ``place_block`` the x/y/z coordinates are coerced via
+    ``int()`` (truncate toward zero, matching the body's pathfinder rounding).
+    """
+    tool_name = step.get("tool_name")
+    if tool_name == "chat":
+        return None
+    template = _ANNOUNCE_TEMPLATES.get(tool_name)
+    if template is None:
+        return None
+    args = step.get("args") or {}
+    if tool_name == "navigate":
+        return template.format(
+            x=int(args.get("x", 0)),
+            y=int(args.get("y", 0)),
+            z=int(args.get("z", 0)),
+        )
+    if tool_name == "place_block":
+        return template.format(
+            block=args.get("block", ""),
+            x=int(args.get("x", 0)),
+            y=int(args.get("y", 0)),
+            z=int(args.get("z", 0)),
+        )
+    if tool_name == "mine":
+        return template.format(
+            count=args.get("count", 0),
+            target=args.get("target", ""),
+        )
+    if tool_name == "craft":
+        return template.format(
+            count=args.get("count", 0),
+            item=args.get("item", ""),
+        )
+    if tool_name == "get_bot_status":
+        return template
+    return None  # unreachable -- keeps mypy happy
+
+
 def executor_node(
-    state: AgentState, *, body_client: "BodyClient | None" = None
+    state: AgentState,
+    *,
+    body_client: "BodyClient | None" = None,
+    announce: bool | None = None,
 ) -> AgentState:
     """Dispatch the current plan step through the body and record the result.
 
@@ -57,6 +142,13 @@ def executor_node(
             a real ``BodyClient`` is constructed lazily — that import lives
             inside the function body to keep ``requests`` out of
             ``sys.modules`` at module load time.
+        announce: Optional override for the pre-action chat narration
+            (Sprint 3k). ``None`` (default) defers to the ``BRAIN_ANNOUNCE``
+            env var; absent env -> default ON. ``True``/``False`` forces the
+            behavior, overriding env. When announcing, the executor sends a
+            ``chat`` tool call with a deterministic per-tool template before
+            dispatching the real tool; failures are swallowed and logged to
+            stderr (the announcement does NOT touch ``state``).
 
     Returns:
         A new ``AgentState`` dict (shallow copy of the input) with
@@ -65,7 +157,9 @@ def executor_node(
         ``get_bot_status`` call with non-None data -- ``bot_status`` replaced
         with a fresh dict copied from the result payload.
     """
-    new_state: AgentState = dict(state)  # shallow copy; preserves identity of unchanged fields
+    new_state: AgentState = dict(
+        state
+    )  # shallow copy; preserves identity of unchanged fields
 
     plan = state.get("plan", []) or []
     current_step = int(state.get("current_step", 0))
@@ -88,6 +182,18 @@ def executor_node(
         from src.body_client import BodyClient
 
         body_client = BodyClient()
+
+    # --- Pre-action announcement (Sprint 3k) ------------------------------
+    if _resolve_announce(announce):
+        announce_text = _format_announcement(step_dict)
+        if announce_text is not None:
+            try:
+                body_client.execute("chat", {"message": announce_text})
+            except Exception as exc:  # noqa: BLE001
+                print(
+                    f"executor: announcement failed (swallowed): {exc!r}",
+                    file=sys.stderr,
+                )
 
     # --- Dispatch ---------------------------------------------------------
     try:

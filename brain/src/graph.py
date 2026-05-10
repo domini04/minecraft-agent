@@ -93,6 +93,7 @@ def _should_continue_after_executor(state: AgentState) -> str:
 def build_graph(
     llm: "BaseChatModel | None" = None,
     body_client: "BodyClient | None" = None,
+    announce: bool | None = None,
 ):
     """Compile the Phase-3 planner -> executor LangGraph.
 
@@ -104,6 +105,11 @@ def build_graph(
             injected into the executor node via ``functools.partial``.
             When None, the executor constructs a real ``BodyClient``
             lazily.
+        announce: Optional override for the pre-action chat narration
+            (Sprint 3k). When non-None, bound into the executor partial
+            and overrides the ``BRAIN_ANNOUNCE`` env var. When ``None``,
+            the executor reads ``BRAIN_ANNOUNCE`` at invocation time
+            (default ON when env unset).
 
     Returns:
         A compiled LangGraph (``CompiledStateGraph``). Call
@@ -111,11 +117,15 @@ def build_graph(
         The graph is stateless across invocations.
     """
     planner_fn = partial(planner_node, llm=llm) if llm is not None else planner_node
-    executor_fn = (
-        partial(executor_node, body_client=body_client)
-        if body_client is not None
-        else executor_node
-    )
+    if body_client is not None or announce is not None:
+        executor_kwargs: dict = {}
+        if body_client is not None:
+            executor_kwargs["body_client"] = body_client
+        if announce is not None:
+            executor_kwargs["announce"] = announce
+        executor_fn = partial(executor_node, **executor_kwargs)
+    else:
+        executor_fn = executor_node
 
     graph = StateGraph(AgentState)
     graph.add_node("planner", planner_fn)
@@ -138,6 +148,7 @@ def run_goal(
     goal: str,
     llm: "BaseChatModel | None" = None,
     body_client: "BodyClient | None" = None,
+    announce: bool | None = None,
 ) -> AgentState:
     """Build the graph, seed initial state, invoke once, return final state.
 
@@ -147,10 +158,13 @@ def run_goal(
         goal: User's natural-language request.
         llm: Optional injected chat model (test seam).
         body_client: Optional injected ``BodyClient`` (test seam).
+        announce: Optional override for pre-action chat narration
+            (Sprint 3k). See ``build_graph`` for semantics. ``None``
+            defers to ``BRAIN_ANNOUNCE`` env var (default ON).
 
     Returns:
         The final ``AgentState`` dict after the graph terminates.
     """
     initial = make_initial_state(goal)
-    graph = build_graph(llm=llm, body_client=body_client)
+    graph = build_graph(llm=llm, body_client=body_client, announce=announce)
     return graph.invoke(initial, config={"recursion_limit": 50})

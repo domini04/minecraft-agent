@@ -82,6 +82,16 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--no-announce",
+        dest="no_announce",
+        action="store_true",
+        help=(
+            "Disable pre-action narration (in-MC chat messages announcing "
+            "what the bot is about to do). Default: ON. Overrides the "
+            "BRAIN_ANNOUNCE env var."
+        ),
+    )
+    parser.add_argument(
         "-v",
         "--verbose",
         action="store_true",
@@ -229,7 +239,13 @@ def main(
     try:
         from src.graph import run_goal  # lazy: pulls langgraph only when used
 
-        final = run_goal(args.goal, llm=llm, body_client=body_client)
+        announce = False if args.no_announce else None
+        final = run_goal(
+            args.goal,
+            llm=llm,
+            body_client=body_client,
+            announce=announce,
+        )
     except Exception as exc:  # noqa: BLE001
         print(f"error: run failed: {exc!r}", file=sys.stderr)
         return 2

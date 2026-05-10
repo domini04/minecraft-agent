@@ -45,6 +45,15 @@ from src.__main__ import main
 BRAIN_DIR = Path(__file__).resolve().parent.parent
 
 
+@pytest.fixture(autouse=True)
+def _disable_announce_by_default(monkeypatch):
+    """Sprint 3k: turn off pre-action announcements for all main() tests
+    that don't explicitly opt in. Tests that exercise announcement behavior
+    override this with their own monkeypatch.setenv or `--no-announce`.
+    """
+    monkeypatch.setenv("BRAIN_ANNOUNCE", "0")
+
+
 # ---------- inline stubs (independent of test_graph.py) ----------
 
 
@@ -467,6 +476,70 @@ def test_main_step_data_truncation(capsys):
     assert len(pairs) == 3, f"expected 3 kv pairs, got {pairs}"
     # k3 should be dropped (only first 3 dict keys retained).
     assert "k3=" not in row
+
+
+# ========== Sprint 3k: --no-announce CLI flag (K6) ==========
+
+
+def test_main_no_announce_flag_disables_announcement(monkeypatch, capsys):
+    """K6: --no-announce flag -> announcement chat call is suppressed.
+
+    Drive with BRAIN_ANNOUNCE=1 to prove the CLI flag overrides the env.
+    """
+    monkeypatch.setenv("BRAIN_ANNOUNCE", "1")  # default-on environment
+
+    stub_llm = StubLLM(
+        [
+            _navigate_tool_call("k6"),
+            AIMessage(content="done", tool_calls=[]),
+        ]
+    )
+    stub_body = StubBodyClient(response=_navigate_success_envelope())
+
+    rc = main(
+        ["go there", "--no-announce"],
+        llm=stub_llm,
+        body_client=stub_body,
+    )
+
+    capsys.readouterr()  # drain
+    assert rc == 0
+    # Only the real navigate call -- no chat announcement.
+    assert len(stub_body.calls) == 1
+    assert stub_body.calls[0] == ("navigate", {"x": 1, "y": 64, "z": 2})
+
+
+def test_main_no_announce_flag_parsed_in_help():
+    """K6b: ``--help`` mentions --no-announce."""
+    result = subprocess.run(
+        [sys.executable, "-m", "src", "--help"],
+        cwd=str(BRAIN_DIR),
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0
+    assert "--no-announce" in result.stdout
+
+
+def test_main_announce_default_on_fires_chat(monkeypatch, capsys):
+    """K6c: without --no-announce and env=1, the chat announcement fires."""
+    monkeypatch.setenv("BRAIN_ANNOUNCE", "1")
+
+    stub_llm = StubLLM(
+        [
+            _navigate_tool_call("k6c"),
+            AIMessage(content="done", tool_calls=[]),
+        ]
+    )
+    stub_body = StubBodyClient(response=_navigate_success_envelope())
+
+    rc = main(["go there"], llm=stub_llm, body_client=stub_body)
+    capsys.readouterr()
+    assert rc == 0
+    # Two calls: announcement chat then real navigate.
+    assert len(stub_body.calls) == 2
+    assert stub_body.calls[0] == ("chat", {"message": "Heading to (1, 64, 2)..."})
+    assert stub_body.calls[1] == ("navigate", {"x": 1, "y": 64, "z": 2})
 
 
 if __name__ == "__main__":  # pragma: no cover - manual invocation aid

@@ -90,7 +90,7 @@ def test_executor_dispatch_happy_path():
     )
     state = _make_state(plan=plan, current_step=0)
 
-    new_state = executor_node(state, body_client=stub)
+    new_state = executor_node(state, body_client=stub, announce=False)
 
     assert stub.call_count == 1
     assert stub.last_call_args == ("navigate", {"x": 1, "y": 64, "z": 2})
@@ -126,7 +126,7 @@ def test_executor_dispatch_failure_envelope():
     )
     state = _make_state(plan=plan, current_step=0)
 
-    new_state = executor_node(state, body_client=stub)
+    new_state = executor_node(state, body_client=stub, announce=False)
 
     row = new_state["step_results"][-1]
     assert row["success"] is False
@@ -159,13 +159,11 @@ def test_executor_bot_status_refresh_on_get_bot_status_success():
     )
     state = _make_state(plan=plan, current_step=0, bot_status={})
 
-    new_state = executor_node(state, body_client=stub)
+    new_state = executor_node(state, body_client=stub, announce=False)
 
     assert new_state["bot_status"]["position"] == {"x": 10, "y": 64, "z": 20}
     assert new_state["bot_status"]["health"] == 18
-    assert new_state["bot_status"]["inventory"] == [
-        {"name": "oak_log", "count": 3}
-    ]
+    assert new_state["bot_status"]["inventory"] == [{"name": "oak_log", "count": 3}]
     # New dict identity (input bot_status was {}; output is the refreshed copy).
     assert new_state["bot_status"] is not state["bot_status"]
     assert new_state["current_step"] == 1
@@ -191,11 +189,9 @@ def test_executor_no_bot_status_refresh_on_get_bot_status_failure():
         }
     )
     initial_bot_status = {"position": {"x": 0, "y": 64, "z": 0}, "health": 20}
-    state = _make_state(
-        plan=plan, current_step=0, bot_status=initial_bot_status
-    )
+    state = _make_state(plan=plan, current_step=0, bot_status=initial_bot_status)
 
-    new_state = executor_node(state, body_client=stub)
+    new_state = executor_node(state, body_client=stub, announce=False)
 
     assert new_state["bot_status"] == {
         "position": {"x": 0, "y": 64, "z": 0},
@@ -222,11 +218,9 @@ def test_executor_no_bot_status_refresh_on_other_tool_success():
         }
     )
     initial_bot_status = {"position": {"x": 0, "y": 64, "z": 0}}
-    state = _make_state(
-        plan=plan, current_step=0, bot_status=initial_bot_status
-    )
+    state = _make_state(plan=plan, current_step=0, bot_status=initial_bot_status)
 
-    new_state = executor_node(state, body_client=stub)
+    new_state = executor_node(state, body_client=stub, announce=False)
 
     assert new_state["bot_status"] == {"position": {"x": 0, "y": 64, "z": 0}}
     assert new_state["bot_status"] is state["bot_status"]
@@ -244,7 +238,7 @@ def test_executor_malformed_envelope_synthesizes_error_result():
     )
     state = _make_state(plan=plan, current_step=0)
 
-    new_state = executor_node(state, body_client=stub)
+    new_state = executor_node(state, body_client=stub, announce=False)
 
     row = new_state["step_results"][-1]
     assert row["success"] is False
@@ -266,7 +260,7 @@ def test_executor_body_client_raise_synthesizes_error_result():
     stub = StubBodyClient(raises=ConnectionError("Connection refused"))
     state = _make_state(plan=plan, current_step=0)
 
-    new_state = executor_node(state, body_client=stub)
+    new_state = executor_node(state, body_client=stub, announce=False)
 
     row = new_state["step_results"][-1]
     assert row["success"] is False
@@ -289,7 +283,7 @@ def test_executor_out_of_range_current_step_past_end():
     stub = StubBodyClient(response=None)
     state = _make_state(plan=plan, current_step=2, step_results=[])
 
-    new_state = executor_node(state, body_client=stub)
+    new_state = executor_node(state, body_client=stub, announce=False)
 
     assert stub.call_count == 0
     assert new_state["result"] == (
@@ -304,7 +298,7 @@ def test_executor_out_of_range_current_step_empty_plan():
     stub = StubBodyClient(response=None)
     state = _make_state(plan=[], current_step=0, step_results=[])
 
-    new_state = executor_node(state, body_client=stub)
+    new_state = executor_node(state, body_client=stub, announce=False)
 
     assert stub.call_count == 0
     assert new_state["result"] == (
@@ -339,7 +333,7 @@ def test_executor_does_not_mutate_input_state():
     step_results_id_before = id(state["step_results"])
     bot_status_id_before = id(state["bot_status"])
 
-    new_state = executor_node(state, body_client=stub)
+    new_state = executor_node(state, body_client=stub, announce=False)
 
     # Deep equality: input state is unchanged in every field.
     assert state == snapshot
@@ -436,3 +430,251 @@ def test_executor_signature_is_kwarg_only_for_body_client():
     assert "body_client" in params
     assert params["body_client"].kind is inspect.Parameter.KEYWORD_ONLY
     assert params["body_client"].default is None
+
+
+# ========== Sprint 3k: pre-action announcement (K1-K7) ==========
+
+
+# ---------- K1: announce fires before non-chat tool dispatch ----------
+
+
+def test_executor_announces_before_non_chat_tool():
+    """K1: navigate step -> stub records 2 calls in order: chat then navigate."""
+    plan = [{"tool_name": "navigate", "args": {"x": 1, "y": 64, "z": 2}}]
+    calls = []
+
+    class RecordingStub:
+        def execute(self, tool, params=None):
+            calls.append((tool, params))
+            return {
+                "success": True,
+                "data": {"reached": True},
+                "tool": "navigate",
+                "duration_ms": 1.0,
+            }
+
+    state = _make_state(plan=plan, current_step=0)
+    new_state = executor_node(state, body_client=RecordingStub(), announce=True)
+
+    assert len(calls) == 2
+    assert calls[0] == ("chat", {"message": "Heading to (1, 64, 2)..."})
+    assert calls[1] == ("navigate", {"x": 1, "y": 64, "z": 2})
+    # The actual tool result is recorded; announcement is NOT in step_results.
+    assert len(new_state["step_results"]) == 1
+    assert new_state["step_results"][0]["tool"] == "navigate"
+
+
+# ---------- K2: announce skipped on chat tool ----------
+
+
+def test_executor_skips_announce_on_chat_tool():
+    """K2: chat step -> stub records 1 call (the chat itself, no announcement)."""
+    plan = [{"tool_name": "chat", "args": {"message": "hello"}}]
+    calls = []
+
+    class RecordingStub:
+        def execute(self, tool, params=None):
+            calls.append((tool, params))
+            return {
+                "success": True,
+                "data": None,
+                "tool": "chat",
+                "duration_ms": 1.0,
+            }
+
+    state = _make_state(plan=plan, current_step=0)
+    new_state = executor_node(state, body_client=RecordingStub(), announce=True)
+
+    assert len(calls) == 1
+    assert calls[0] == ("chat", {"message": "hello"})
+    assert new_state["step_results"][0]["tool"] == "chat"
+
+
+# ---------- K3: announcement failure swallowed ----------
+
+
+def test_executor_announcement_failure_is_swallowed(capsys):
+    """K3: chat call raises; real tool still runs; no BODY_CLIENT_ERROR row."""
+    plan = [{"tool_name": "navigate", "args": {"x": 1, "y": 64, "z": 2}}]
+    calls = []
+
+    class FlakyStub:
+        def execute(self, tool, params=None):
+            calls.append((tool, params))
+            if tool == "chat":
+                raise ConnectionError("body offline")
+            return {
+                "success": True,
+                "data": {"reached": True},
+                "tool": "navigate",
+                "duration_ms": 1.0,
+            }
+
+    state = _make_state(plan=plan, current_step=0)
+    new_state = executor_node(state, body_client=FlakyStub(), announce=True)
+
+    # Both attempts happened: chat raised, navigate succeeded.
+    assert len(calls) == 2
+    assert calls[0][0] == "chat"
+    assert calls[1][0] == "navigate"
+    # Real tool result recorded; NOT a BODY_CLIENT_ERROR.
+    assert len(new_state["step_results"]) == 1
+    row = new_state["step_results"][0]
+    assert row["success"] is True
+    assert row["tool"] == "navigate"
+    # Stderr got the swallow log.
+    captured = capsys.readouterr()
+    assert "announcement failed" in captured.err
+    assert "body offline" in captured.err
+
+
+# ---------- K4: announce=False disables ----------
+
+
+def test_executor_announce_false_skips_chat_call():
+    """K4: announce=False -> no announcement chat call, only the real tool."""
+    plan = [{"tool_name": "navigate", "args": {"x": 1, "y": 64, "z": 2}}]
+    stub = StubBodyClient(
+        response={
+            "success": True,
+            "data": {"reached": True},
+            "tool": "navigate",
+            "duration_ms": 1.0,
+        }
+    )
+    state = _make_state(plan=plan, current_step=0)
+
+    new_state = executor_node(state, body_client=stub, announce=False)
+
+    assert stub.call_count == 1
+    assert stub.last_call_args == ("navigate", {"x": 1, "y": 64, "z": 2})
+    assert new_state["step_results"][0]["success"] is True
+
+
+# ---------- K5: env BRAIN_ANNOUNCE=0 disables ----------
+
+
+def test_executor_env_disable_skips_chat_call(monkeypatch):
+    """K5: BRAIN_ANNOUNCE=0 in env disables when no explicit kwarg supplied."""
+    monkeypatch.setenv("BRAIN_ANNOUNCE", "0")
+    plan = [{"tool_name": "navigate", "args": {"x": 1, "y": 64, "z": 2}}]
+    stub = StubBodyClient(
+        response={
+            "success": True,
+            "data": {"reached": True},
+            "tool": "navigate",
+            "duration_ms": 1.0,
+        }
+    )
+    state = _make_state(plan=plan, current_step=0)
+
+    # No announce= kwarg -> falls through to env.
+    new_state = executor_node(state, body_client=stub)
+
+    assert stub.call_count == 1
+    assert stub.last_call_args == ("navigate", {"x": 1, "y": 64, "z": 2})
+    assert new_state["step_results"][0]["success"] is True
+
+
+def test_executor_env_default_on_when_unset(monkeypatch):
+    """K5b: BRAIN_ANNOUNCE unset + no kwarg -> announcement fires (default ON)."""
+    monkeypatch.delenv("BRAIN_ANNOUNCE", raising=False)
+    plan = [{"tool_name": "navigate", "args": {"x": 1, "y": 64, "z": 2}}]
+    calls = []
+
+    class RecordingStub:
+        def execute(self, tool, params=None):
+            calls.append((tool, params))
+            return {
+                "success": True,
+                "data": {"reached": True},
+                "tool": "navigate",
+                "duration_ms": 1.0,
+            }
+
+    state = _make_state(plan=plan, current_step=0)
+    executor_node(state, body_client=RecordingStub())  # no announce kwarg
+
+    assert len(calls) == 2
+    assert calls[0] == ("chat", {"message": "Heading to (1, 64, 2)..."})
+
+
+# ---------- K7: templates frozen (per-tool exact-string assertions) ----------
+
+
+def test_announcement_template_get_bot_status():
+    from src.nodes.executor import _format_announcement
+
+    assert (
+        _format_announcement({"tool_name": "get_bot_status", "args": {}})
+        == "Checking my status..."
+    )
+
+
+def test_announcement_template_navigate_int_coerces_floats():
+    from src.nodes.executor import _format_announcement
+
+    # Floats are int-coerced (truncate toward zero).
+    assert (
+        _format_announcement(
+            {"tool_name": "navigate", "args": {"x": 1.7, "y": 64.0, "z": -2.9}}
+        )
+        == "Heading to (1, 64, -2)..."
+    )
+    # Plain ints pass through.
+    assert (
+        _format_announcement(
+            {"tool_name": "navigate", "args": {"x": 10, "y": 64, "z": 20}}
+        )
+        == "Heading to (10, 64, 20)..."
+    )
+
+
+def test_announcement_template_mine():
+    from src.nodes.executor import _format_announcement
+
+    assert (
+        _format_announcement(
+            {"tool_name": "mine", "args": {"count": 3, "target": "oak_log"}}
+        )
+        == "Mining 3 oak_log..."
+    )
+
+
+def test_announcement_template_craft():
+    from src.nodes.executor import _format_announcement
+
+    assert (
+        _format_announcement(
+            {"tool_name": "craft", "args": {"count": 2, "item": "stick"}}
+        )
+        == "Crafting 2 stick..."
+    )
+
+
+def test_announcement_template_place_block_int_coerces_floats():
+    from src.nodes.executor import _format_announcement
+
+    assert (
+        _format_announcement(
+            {
+                "tool_name": "place_block",
+                "args": {"block": "stone", "x": 5.4, "y": 64.0, "z": 7.9},
+            }
+        )
+        == "Placing stone at (5, 64, 7)..."
+    )
+
+
+def test_announcement_template_chat_returns_none():
+    from src.nodes.executor import _format_announcement
+
+    assert (
+        _format_announcement({"tool_name": "chat", "args": {"message": "hi"}}) is None
+    )
+
+
+def test_announcement_template_unknown_tool_returns_none():
+    from src.nodes.executor import _format_announcement
+
+    assert _format_announcement({"tool_name": "fly_to_mars", "args": {}}) is None

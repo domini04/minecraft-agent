@@ -27,10 +27,20 @@ import subprocess
 import sys
 import textwrap
 
+import pytest
 from langchain_core.messages import AIMessage
 
 from src.graph import build_graph, run_goal
 from src.state import MAX_ITERATIONS, make_initial_state
+
+
+@pytest.fixture(autouse=True)
+def _disable_announce_by_default(monkeypatch):
+    """Sprint 3k: deterministic announce-OFF for every test in this file.
+    Tests that need announce-ON override BRAIN_ANNOUNCE explicitly.
+    """
+    monkeypatch.setenv("BRAIN_ANNOUNCE", "0")
+
 
 # ---------- helpers ----------
 
@@ -400,3 +410,56 @@ def test_graph_no_network_imports():
     )
     # Sanity: deny prefixes are real, the test isn't trivially vacuous.
     assert deny_prefixes
+
+
+# ========== Sprint 3k: build_graph announce plumbing (K8) ==========
+
+
+def test_build_graph_plumbs_announce_false(monkeypatch):
+    """K8: build_graph(announce=False) wins over BRAIN_ANNOUNCE=1 env."""
+    monkeypatch.setenv("BRAIN_ANNOUNCE", "1")
+
+    stub_llm = SequenceLLM(
+        [
+            _navigate_tool_call("k8"),
+            AIMessage(content="done", tool_calls=[]),
+        ]
+    )
+    stub_body = StubBodyClient(response=_navigate_success_envelope())
+    g = build_graph(llm=stub_llm, body_client=stub_body, announce=False)
+    g.invoke(make_initial_state("hi"), config={"recursion_limit": 50})
+
+    # No announcement call -- only the real navigate dispatch.
+    assert stub_body.call_count == 1
+    assert stub_body.last_call_args == ("navigate", {"x": 1, "y": 64, "z": 2})
+
+
+def test_build_graph_plumbs_announce_true(monkeypatch):
+    """K8b: build_graph(announce=True) wins over BRAIN_ANNOUNCE=0 env."""
+    monkeypatch.setenv("BRAIN_ANNOUNCE", "0")
+
+    calls = []
+
+    class RecordingStub:
+        def execute(self, tool, params=None):
+            calls.append((tool, params))
+            return {
+                "success": True,
+                "data": {"reached": True},
+                "tool": "navigate",
+                "duration_ms": 1.0,
+            }
+
+    stub_llm = SequenceLLM(
+        [
+            _navigate_tool_call("k8b"),
+            AIMessage(content="done", tool_calls=[]),
+        ]
+    )
+    g = build_graph(llm=stub_llm, body_client=RecordingStub(), announce=True)
+    g.invoke(make_initial_state("hi"), config={"recursion_limit": 50})
+
+    # Two calls in order: chat announcement then navigate.
+    assert len(calls) == 2
+    assert calls[0] == ("chat", {"message": "Heading to (1, 64, 2)..."})
+    assert calls[1][0] == "navigate"
