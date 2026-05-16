@@ -1,10 +1,10 @@
-"""Phase-3 subset of the LangGraph shared state.
+"""Phase-3/4 subset of the LangGraph shared state.
 
 This module defines the AgentState TypedDict and the make_initial_state factory
-used by the Phase-3 Planner+Executor graph. It intentionally contains only the
-seven fields active in Phase 3; the forward-looking complete schema (including
-Phase 4–5 fields ``guide``, ``retry_count``, and ``errors``) is documented in
-docs/AGENT_STATE.md.
+used by the Planner+Executor graph. It contains the seven Phase-3 fields plus
+the Phase-4 ``guide`` field added in Sprint 4a; the forward-looking complete
+schema (including Phase 5 fields ``retry_count``, and ``errors``) is documented
+in docs/AGENT_STATE.md.
 
 No network calls, no LLM imports, no LangGraph dependencies — pure stdlib typing.
 """
@@ -19,14 +19,14 @@ MAX_ITERATIONS: int = 10
 
 
 class AgentState(TypedDict, total=False):
-    """Shared state dict threaded through every node in the Phase-3 LangGraph.
+    """Shared state dict threaded through every node in the Phase-3/4 LangGraph.
 
     ``total=False`` lets individual nodes write only the fields they own;
-    ``make_initial_state`` seeds all seven keys so downstream nodes can read
+    ``make_initial_state`` seeds all eight keys so downstream nodes can read
     safe empty defaults without risking a ``KeyError``.
 
     See docs/AGENT_STATE.md for the complete forward-looking field spec
-    including Phase 4–5 fields deferred from this implementation.
+    including Phase 5 fields deferred from this implementation.
     """
 
     goal: str
@@ -50,14 +50,22 @@ class AgentState(TypedDict, total=False):
     result: str
     """Final output message set when the graph reaches a terminal node."""
 
+    guide: dict
+    """Scaled SOP retrieved by the Guide Retriever node (Phase 4).
+
+    Populated by ``guide_retriever_node`` in Sprint 4c. Empty ``{}`` when the
+    retriever finds no matching SOP (D32 fallback). Planner reads this in Sprint
+    4d to render the 'Active guide' block.
+    """
+
 
 def make_initial_state(goal: str) -> AgentState:
-    """Return a fully-seeded AgentState with Phase-3 defaults.
+    """Return a fully-seeded AgentState with Phase-3/4 defaults.
 
-    All seven fields are populated so that every downstream node can read them
+    All eight fields are populated so that every downstream node can read them
     without a ``KeyError``. Mutable defaults (``plan``, ``step_results``,
-    ``bot_status``) are constructed as fresh literals inside this function body
-    on every call — never shared across invocations.
+    ``bot_status``, ``guide``) are constructed as fresh literals inside this
+    function body on every call — never shared across invocations.
 
     Args:
         goal: The user's natural-language request verbatim.
@@ -76,4 +84,5 @@ def make_initial_state(goal: str) -> AgentState:
         bot_status={},
         iteration_count=0,
         result="",
+        guide={},
     )

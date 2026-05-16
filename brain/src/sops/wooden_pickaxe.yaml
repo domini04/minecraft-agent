@@ -1,0 +1,12 @@
+name: Wooden Pickaxe
+description: Craft a wooden pickaxe from oak planks and sticks.
+tags: [crafting, tools, pickaxe, wood]
+yields: 1
+requires:
+  - { item: oak_log, count_per_unit: 2 }
+steps:
+  - { action: mine,  target: oak_log,        count_per_unit: 2 }
+  - { action: craft, item:   oak_planks,     count_per_unit: 8 }
+  - { action: craft, item:   stick,          count_per_unit: 4 }
+  - { action: craft, item:   crafting_table, count_per_unit: 1, scale: false }
+  - { action: craft, item:   wooden_pickaxe, count_per_unit: 1 }

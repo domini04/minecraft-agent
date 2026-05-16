@@ -1,0 +1,8 @@
+name: Crafting Table
+description: Craft a crafting table from oak planks.
+tags: [crafting, station, wood]
+yields: 1
+requires:
+  - { item: oak_planks, count_per_unit: 4 }
+steps:
+  - { action: craft, item: crafting_table, count_per_unit: 1 }

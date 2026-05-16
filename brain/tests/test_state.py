@@ -15,7 +15,7 @@ from src.state import MAX_ITERATIONS, AgentState, make_initial_state
 # Constants
 # ---------------------------------------------------------------------------
 
-_PHASE3_FIELDS = {
+_AGENT_STATE_FIELDS = {
     "goal",
     "plan",
     "current_step",
@@ -23,6 +23,7 @@ _PHASE3_FIELDS = {
     "bot_status",
     "iteration_count",
     "result",
+    "guide",
 }
 
 
@@ -31,15 +32,15 @@ _PHASE3_FIELDS = {
 # ---------------------------------------------------------------------------
 
 
-def test_agent_state_has_phase3_fields():
-    """AgentState has exactly the seven Phase-3 fields — no more, no less.
+def test_agent_state_has_expected_fields():
+    """AgentState has exactly the 8 fields including ``guide`` (Phase 4) — no more, no less.
 
-    Explicitly asserts that Phase-4/5 fields (``guide``, ``errors``,
-    ``retry_count``) have not leaked into the current schema.
+    The set covers all Phase-3 fields plus the Phase-4 ``guide`` slot added in
+    Sprint 4a. Phase-5 fields (``errors``, ``retry_count``) must not be present yet.
     """
     hints = get_type_hints(AgentState)
-    assert set(hints.keys()) == _PHASE3_FIELDS, (
-        f"Field mismatch. Got: {set(hints.keys())!r}, expected: {_PHASE3_FIELDS!r}"
+    assert set(hints.keys()) == _AGENT_STATE_FIELDS, (
+        f"Field mismatch. Got: {set(hints.keys())!r}, expected: {_AGENT_STATE_FIELDS!r}"
     )
 
 
@@ -64,6 +65,7 @@ def test_agent_state_field_types():
     plan_origin = getattr(hints["plan"], "__origin__", hints["plan"])
     step_results_origin = getattr(hints["step_results"], "__origin__", hints["step_results"])
     bot_status_origin = getattr(hints["bot_status"], "__origin__", hints["bot_status"])
+    guide_origin = getattr(hints["guide"], "__origin__", hints["guide"])
 
     assert plan_origin is list, f"plan type origin should be list, got {plan_origin!r}"
     assert step_results_origin is list, (
@@ -72,10 +74,13 @@ def test_agent_state_field_types():
     assert bot_status_origin is dict, (
         f"bot_status type origin should be dict, got {bot_status_origin!r}"
     )
+    assert guide_origin is dict, (
+        f"guide type origin should be dict, got {guide_origin!r}"
+    )
 
 
 def test_make_initial_state_defaults():
-    """make_initial_state returns all seven keys with documented defaults."""
+    """make_initial_state returns all eight keys with documented defaults."""
     s = make_initial_state("test goal")
 
     assert s["goal"] == "test goal"
@@ -85,8 +90,9 @@ def test_make_initial_state_defaults():
     assert s["bot_status"] == {}
     assert s["iteration_count"] == 0
     assert s["result"] == ""
-    assert set(s.keys()) == _PHASE3_FIELDS, (
-        f"Key mismatch. Got: {set(s.keys())!r}, expected: {_PHASE3_FIELDS!r}"
+    assert s["guide"] == {}
+    assert set(s.keys()) == _AGENT_STATE_FIELDS, (
+        f"Key mismatch. Got: {set(s.keys())!r}, expected: {_AGENT_STATE_FIELDS!r}"
     )
 
 

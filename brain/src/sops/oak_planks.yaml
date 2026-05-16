@@ -1,0 +1,8 @@
+name: Oak Planks
+description: Craft oak planks from oak logs.
+tags: [crafting, planks, wood]
+yields: 4
+requires:
+  - { item: oak_log, count_per_unit: 1 }
+steps:
+  - { action: craft, item: oak_planks, count_per_unit: 4 }

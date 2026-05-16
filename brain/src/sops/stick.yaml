@@ -1,0 +1,8 @@
+name: Stick
+description: Craft sticks from oak planks.
+tags: [crafting, sticks, wood]
+yields: 4
+requires:
+  - { item: oak_planks, count_per_unit: 2 }
+steps:
+  - { action: craft, item: stick, count_per_unit: 4 }

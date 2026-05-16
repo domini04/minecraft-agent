@@ -1,0 +1,16 @@
+name: Stone Pickaxe
+description: Craft a stone pickaxe from cobblestone and sticks, mining inputs as needed.
+tags: [crafting, tools, pickaxe, stone]
+yields: 1
+disabled: false
+requires:
+  - { item: oak_log,     count_per_unit: 3 }
+  - { item: cobblestone, count_per_unit: 3 }
+steps:
+  - { action: mine,  target: oak_log,        count_per_unit: 3 }
+  - { action: craft, item:   oak_planks,     count_per_unit: 6 }
+  - { action: craft, item:   stick,          count_per_unit: 2 }
+  - { action: craft, item:   crafting_table, count_per_unit: 1, scale: false }
+  - { action: craft, item:   wooden_pickaxe, count_per_unit: 1, scale: false }
+  - { action: mine,  target: stone,          count_per_unit: 3 }
+  - { action: craft, item:   stone_pickaxe,  count_per_unit: 1 }
