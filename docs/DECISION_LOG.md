@@ -66,7 +66,9 @@ This document records the architectural and technical decisions made during blue
 
 **Reasoning for phased approach**: Debugging clarity. During development, when the agent fails, you need to know: was the retrieval wrong, or was the plan wrong? Tag lookup makes retrieval transparent. ChromaDB adds a "why did it pick this?" debugging layer. Adding it after the core pipeline works means you only debug one thing at a time.
 
-**Decision**: Tag-based lookup for v1, ChromaDB as a v2 enhancement.
+**Decision (original, 2026-02-05)**: Tag-based lookup for v1, ChromaDB as a v2 enhancement.
+
+**Amendment (2026-05-10, Phase 4 kickoff — see Decision 30)**: Tag-based deterministic matching is REPLACED by a cache-first LLM router. The "debuggability" rationale is preserved through a different mechanism: the LLM router's choices are cached deterministically (normalized goal → SOP name) so every repeat goal becomes a transparent lookup after the first call. ChromaDB upgrade flagged as "may not be needed at this scale; reconsider if semantic gaps surface in practice." Full reasoning in Decision 30.
 
 ---
 
@@ -711,3 +713,151 @@ app.listen(PORT, HOST);
 **Constraint locked now to keep deferral cheap**: Phase 3 entry point is "given `goal: str`, return `result: str`" — no CLI-specific assumptions baked into `AgentState` or graph wiring. Phase 3.5 then adds the chat surface as a pure addition (no Phase 3 refactor).
 
 **Decision**: Defer to Phase 3.5 or Phase 8. When built: predefined commands, any player, always-on brain HTTP server with `POST /goal` endpoint. Constraint above is honored in Phase 3 design to keep the deferral free.
+
+---
+
+## Decision 29: SOP Storage Shape
+
+**Phase**: 4 (Knowledge)
+
+**Question**: Where do SOPs live on disk — one file per SOP, one consolidated YAML, or a hybrid?
+
+**Context**: Phase 4 introduces a library of Standard Operating Procedures (semi-structured YAML per Decision 8). The library will grow over time as more goals are supported.
+
+| Option | Considered | Notes |
+|---|:---:|---|
+| One file per SOP at `brain/src/sops/<name>.yaml` | (rejected as sole choice — see below) | Git-friendly, error-isolated, easy disable, but no central catalog for human discoverability. |
+| One consolidated `sops.yaml` | Rejected | Noisy diffs, merge conflicts on parallel additions, unbounded growth, single parse error invalidates all SOPs. |
+| **Per-file SOPs + auto-generated `index.yaml` catalog** | **Chosen** | Filesystem is source of truth; index is a derived catalog regenerated via `python -m src.sops.build_index`. A drift-guard pytest asserts the checked-in `index.yaml` matches what regeneration produces. |
+
+**Implementation notes**:
+- `brain/src/sops/<name>.yaml` — one file per SOP. Source of truth.
+- `brain/src/sops/index.yaml` — header-commented `# AUTO-GENERATED, do not hand-edit`. Contains `name`, `file`, `description`, `tags`, `yields`, `disabled?` for every SOP.
+- `python -m src.sops.build_index` regenerates the index from disk state.
+- Pytest drift-guard fails the build if the checked-in index diverges from current files.
+- Per-SOP `disabled: true` flag (optional) allows soft-disabling without filesystem renames; loader skips disabled entries.
+- The runtime loader walks the directory and builds its own in-memory tag map — the on-disk index is primarily a human-readable catalog.
+
+**Decision**: Per-file YAMLs at `brain/src/sops/`; auto-generated `index.yaml`; drift-guard test; optional `disabled: true` flag per SOP.
+
+---
+
+## Decision 30: SOP Retrieval Algorithm (supersedes Decision 4's "tag-based lookup")
+
+**Phase**: 4 (Knowledge)
+
+**Question**: Given a natural-language goal, how do we pick the matching SOP?
+
+**Context**: Decision 4 originally specified deterministic tag-based keyword lookup with debuggability as the rationale. Phase 4 design surfaced two issues with that approach: (1) authors would have to hand-curate every plural/synonym as a tag, and (2) the project's existing LLM infrastructure already provides semantic understanding for free.
+
+| Option | Considered | Notes |
+|---|:---:|---|
+| Deterministic tag matching (token overlap with tag splitting) | Rejected | Forces synonym maintenance burden on authors. Brittle to plurals and rephrasings. |
+| Weighted token overlap (TF-IDF) | Rejected | Marginal benefit for libraries <500 SOPs; less debuggable. |
+| Fuzzy / Levenshtein matching | Rejected | New dep; black-box scoring; wrong abstraction layer for semantics. |
+| Naive LLM call (no cache) | Rejected on cost grounds | $0.0001 per goal × every invocation. Wasteful for repeated goals. Also no retry guard. |
+| **Cache-first LLM router with 1-retry validation** | **Chosen** | Dedicated `guide_retriever_node` makes one LLM call to pick `{sop_name, count}` from goal + manifest. Result memoized in persistent JSON cache keyed by normalized goal. Manifest-fingerprint invalidation drops stale entries. Output validated against manifest; one retry with stronger prompt if invalid; clean fallback to no-match. |
+
+**How it preserves Decision 4's debuggability rationale**:
+- Every cache entry is a transparent `(normalized_goal) → {sop_name, count}` mapping you can grep.
+- After first call per unique goal, behavior is fully deterministic.
+- The LLM call itself is logged (manifest, goal, raw response) for audit.
+
+**Reasoning**:
+1. Eliminates the synonym-curation maintenance burden on SOP authors. They write one good `description:` field; the LLM understands plurals, paraphrases, and intent.
+2. Cache makes amortized cost asymptote to zero — first goal of each shape pays ~$0.0001, all subsequent are free.
+3. Validation + 1-retry is narrow defensive coding (not Phase 5 Reflexion); ensures LLM hallucinations don't poison cache.
+4. The project thesis ("LLM decides, deterministic code executes") is not violated — retrieval is a *decision*, not an action. Decisions are the LLM's domain per Decision 10.
+5. Phase 7 ChromaDB upgrade is now optional rather than necessary; reconsider only if semantic gaps surface in real use.
+
+**Cache spec**:
+- Location: `brain/.cache/sop_routes.json` (gitignored).
+- Schema: `{ "manifest_fingerprint": "sha256:...", "entries": { "<normalized_goal>": {"sop_name": "<name|<none>>", "count": <int|null>} } }`.
+- Normalization: lowercase + `re.sub(r"\s+", " ", goal).strip()`. No article-stripping, no stemming.
+- Invalidation: SHA-256 hash of `index.yaml` contents. Mismatch on load → drop entire `entries` dict.
+- Cap: unbounded for v1; add LRU at 1000 entries if it ever matters.
+- Sentinel: `"<none>"` cached for confirmed no-matches so repeats are free.
+- Escape hatches: `--no-cache` CLI flag (bypasses read and write); `python -m src.sops.cache clear` wipes the file.
+
+**Decision**: Cache-first LLM router. Dedicated `guide_retriever_node`. Validation + 1-retry. Persistent cache with manifest-fingerprint invalidation.
+
+---
+
+## Decision 31: SOP Variable Substitution
+
+**Phase**: 4 (Knowledge)
+
+**Question**: When a user asks for "5 stone pickaxes," how does the SOP scale from its 1-unit recipe?
+
+**Context**: SOPs describe procedures; goals may request N units. We need a way to scale counts without inventing a template DSL or letting the LLM do arithmetic at runtime.
+
+| Option | Considered | Notes |
+|---|:---:|---|
+| No scaling — LLM does the math | Rejected | LLM arithmetic is brittle for compound cases. Violates the "deterministic code does math" half of the thesis. |
+| Template DSL (`{{count * 3}}`) | Rejected | Introduces a parser, security risk if eval-based, ugly syntax for conditionals. Over-engineered for what's essentially multiplication. |
+| **Declarative scaling via `count_per_unit` data fields** | **Chosen** | SOPs describe 1-unit recipes. A pure function `scale_sop(sop, n)` multiplies `count_per_unit` × n. A `scale: false` opt-out flag handles "you only need 1 crafting table even for 50 pickaxes" cases. |
+| Hand-write per-count SOPs | Rejected | Combinatorial explosion. |
+
+**Where the count comes from**: the Guide Retriever's LLM call returns `{sop_name, count}` jointly. Default count=1 when the goal doesn't specify. Deterministic `scale_sop` runs after retrieval, before planner. Planner sees a fully-scaled SOP — never multiplies anything itself.
+
+**SOP schema (excerpt)**:
+```yaml
+yields: 1
+requires:
+  - { item: oak_log, count_per_unit: 3 }
+steps:
+  - { action: mine, target: oak_log, count_per_unit: 3 }
+  - { action: craft, item: crafting_table, count_per_unit: 1, scale: false }   # always 1
+```
+
+**Decision**: Declarative scaling. `count_per_unit` data fields + `scale: false` opt-out flag. Goal-count extracted by the retriever LLM call. Pure-function multiplication, no template DSL.
+
+---
+
+## Decision 32: No-SOP Fallback
+
+**Phase**: 4 (Knowledge)
+
+**Question**: What happens when the retriever finds no matching SOP for a goal?
+
+**Context**: Many goals won't have an SOP — direct-action goals like "say hello in chat" or experimental goals that we haven't authored yet. The agent must remain useful in those cases.
+
+| Option | Considered | Notes |
+|---|:---:|---|
+| **Fall through to direct planner reasoning (A1: omit guide section from prompt)** | **Chosen** | When `state.guide = {}`, the planner's human message simply omits the guide section. Behavior matches Phase 3 exactly. |
+| Fall through with explicit "no SOP matched" note in prompt (A2) | Rejected | Adds tokens; risks LLM over-hedging on goals it could otherwise solve directly. |
+| Fail loudly | Rejected | Blocks every goal we haven't pre-authored. Regresses Phase 3 capability. |
+
+**Operational notes**:
+- Cache stores `"<none>"` sentinel for confirmed no-matches → repeat no-match goals incur zero LLM cost.
+- Retriever logs `"retriever: no SOP matched goal=<goal>, proceeding with direct reasoning"` to stderr for dev visibility.
+
+**Decision**: Fall through to direct planner reasoning. Planner prompt omits the guide section when `state.guide` is empty. Cache stores `"<none>"`; stderr log on miss.
+
+---
+
+## Decision 33: Inventory Pre-Checks
+
+**Phase**: 4 (Knowledge)
+
+**Question**: Who validates the SOP's `requires` block against the bot's current inventory?
+
+| Option | Considered | Notes |
+|---|:---:|---|
+| Guide Retriever | Rejected | Inventory state in the cache key breaks memoization (high cardinality, changes per run). Defeats Decision 30's cache design. |
+| Executor | Rejected | Too late — planner has already decided. Body's `validate_params` (Sprint 3c-new) + per-tool runtime guards already handle step-level failures. |
+| **Planner** | **Chosen** | Planner already sees `state.bot_status` (inventory) and now also `state.guide` (scaled SOP with `requires` block). Decides what to skip vs execute based on both. Step-level failures feed back via `step_history` and inform the next iteration. |
+
+**Why the planner is the right place**:
+1. The cache-friendliness invariant of Decision 30 is preserved.
+2. The LLM is already doing context-aware reasoning; adding "is this required item already in inventory?" is one more line of judgment for the same prompt.
+3. Recovery is built in — if the planner miscounts and a step fails, body returns an error envelope, step_history captures it, next iteration adapts.
+4. The cost of a planner mistake is an extra iteration, not catastrophic failure.
+
+**Planner prompt extension** (Sprint 4d):
+- Render `state.guide` as a "Active guide" block including scaled `requires` and `steps`.
+- Add instruction line: "Compare required materials to your current inventory; skip steps already satisfied."
+
+**Hard prerequisites (e.g. "iron_pickaxe required to mine diamond, SOP doesn't produce it")**: not formally encoded in the Phase 4 SOP schema. Planner uses its judgment; if a goal is impossible given starting inventory, planner returns no-tool-call with an explanatory `state.result`. Schema flag (e.g. `acquire: prerequisite` vs `acquire: derived`) deferred to Phase 5+.
+
+**Decision**: Planner owns inventory-aware reasoning. No dedicated pre-check node. SOP `requires` schema kept simple (`{item, count_per_unit}`) for Phase 4; richer prerequisite typing deferred to Phase 5.

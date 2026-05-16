@@ -96,14 +96,18 @@ Order is deliberate — each tool builds on patterns from the previous one.
 
 **Goal**: The L2 minimum viable demo works. Core portfolio deliverable.
 
+**Note (2026-05-10)**: design revised at Phase 4 kickoff. Tag-based retrieval is REPLACED by a cache-first LLM router per `docs/DECISION_LOG.md` D30 (which supersedes D4). See HANDOFF.md for implementation-ready detail. Full design recorded as Decisions 29–33.
+
 | Step | Task | Done When |
 |---|---|---|
-| 4.1 | **Author core SOPs** — YAML files for key crafting chains (wooden pickaxe, stone pickaxe, furnace, iron pickaxe) | 4-6 SOP files with correct tags and steps |
-| 4.2 | **SOP loader** — Python reads YAML files from a directory | SOPs load into memory as dicts |
-| 4.3 | **Tag-based retriever** — Match user goal keywords against SOP tags | "Get me a stone pickaxe" → returns stone pickaxe SOP |
-| 4.4 | **Guide Retriever node** — Integrate retriever into LangGraph flow (Node 1) | Planner receives SOP context for its planning |
-| 4.5 | **Retriever tests** — Test tag matching accuracy for various goal phrasings | Correct SOP returned for each test case |
-| 4.6 | **End-to-end test** — "Get me a stone pickaxe" completes autonomously | Bot has stone pickaxe in inventory |
+| 4a | **SOP file format + 5 seed SOPs** — YAML per file at `brain/src/sops/<name>.yaml`. Required fields per D29 + D31 (`name`, `description`, `tags`, `yields`, `requires`, `steps`, optional `disabled`). Seed library: oak_planks, stick, crafting_table, wooden_pickaxe, stone_pickaxe. AgentState gains `guide: dict` field (Phase-4 subset of Decision 25's full schema). | 5 SOPs validate against format schema; `test_sop_format.py` green; `make_initial_state` seeds `guide={}`. |
+| 4b | **Loader + `build_index` + `scale_sop` + drift-guard** — `brain/src/sops/{loader,build_index}.py`. `python -m src.sops.build_index` regenerates `index.yaml` from disk state. `scale_sop(sop, n)` multiplies `count_per_unit` (respects `scale: false`). Drift-guard test asserts the checked-in `index.yaml` matches what regeneration produces. | `scale_sop(stone_pickaxe, 5)` produces correct counts; drift-guard test green. |
+| 4c | **Guide Retriever node with persistent cache** — `guide_retriever_node` makes one LLM call returning `{sop_name, count}`. Persistent cache at `brain/.cache/sop_routes.json` keyed by normalized goal; SHA-256 fingerprint of `index.yaml` for invalidation. 1-retry validation on LLM output. `--no-cache` escape hatch. | Cache hits skip LLM call (verifiable via stub recorder); cache misses validate + retry + cache; fingerprint mismatch drops entries; no-match cached as `"<none>"`. |
+| 4d | **Planner prompt extension** — Render scaled `state.guide` (requires + steps) in human message; amend `_SYSTEM_PROMPT` with "compare required materials to your current inventory; skip steps already satisfied" instruction. | Frozen-prompt test updated and asserted exactly; guide-present path renders correctly; guide-empty path produces no guide section (D32 fallback). |
+| 4e | **Graph wiring** — `START → guide_retriever → planner → ...`. `build_graph(llm, body_client, announce, use_cache)`. CLI `--no-cache` flag. | Existing graph tests still pass; new tests verify guide_retriever invocation order; `--help` shows `--no-cache`. |
+| 4f | **Phase 4 acceptance gate (live smoke)** — `python -m src "<multi-step goal>"` against real Gemini + live MC. Suggested: "craft 1 oak_planks" with pre-seeded inventory. | Multi-step goal completes with CLI exit 0; iteration_count ≤ 4 (1 retriever + 1 planner pick + 1 planner stop); cost ≤ ~$0.01. |
+
+Per `docs/DECISION_LOG.md` D29–D33 and the locked sprint plan in HANDOFF.md.
 
 ---
 

@@ -90,29 +90,52 @@ python -m src "say hello in chat"
 
 ---
 
-## Test Counts
+## Test Counts (post Phase 3 + 3k/3l polish)
 
-- **148 body jest tests** passing (9 suites — adds `validate_params` post-3c-new)
-- **102 brain pytest tests** passing (Phase 3 nodes, graph, models, CLI; all stub-based)
+- **157 body jest tests** passing (9 suites — `validate_params` + tier-scored mine selection)
+- **120 brain pytest tests** passing (Phase 3 nodes, graph, models, CLI, planner narration; all stub-based)
 - **6 deterministic body smoke scenarios** passing (`npm run test:smoke`)
 - **1 live brain smoke scenario** passing (`npm run test:smoke:brain` — real Gemini + live MC)
 
 ---
 
-## Resume Point
+## Phase 4 — Design complete, implementation starts next session
 
-Phase 3 complete. Next: **Phase 4 — Knowledge (SOP library + tag-based Guide Retriever).**
+All five Phase 4 design decisions are locked (`docs/DECISION_LOG.md` D29–D33; D4 amended). HANDOFF.md has implementation-ready detail.
 
-Open follow-ups (low priority, deferrable):
+### Sprint plan
+
+| # | Sprint | Target files | Status |
+|---|---|---|---|
+| 4a | SOP file format + 5 seed SOPs + format schema test | `brain/src/sops/{oak_planks,stick,crafting_table,wooden_pickaxe,stone_pickaxe}.yaml`, `brain/tests/test_sop_format.py` | Pending |
+| 4b | Loader, `build_index`, `scale_sop`, drift-guard test | `brain/src/sops/{loader,build_index}.py`, `brain/src/sops/index.yaml` (generated), `brain/tests/test_sop_{loader,index_drift}.py` | Pending |
+| 4c | Guide Retriever node with persistent cache | `brain/src/sops/cache.py`, `brain/src/nodes/guide_retriever.py`, `brain/tests/test_sop_cache.py`, `brain/tests/test_guide_retriever_node.py` | Pending |
+| 4d | Planner prompt extension (renders scaled guide + inventory-compare instruction) | `brain/src/nodes/planner.py` (modify), `brain/tests/test_planner_node.py` (modify) | Pending |
+| 4e | Graph wiring: insert `guide_retriever` on entry edge + `--no-cache` CLI flag | `brain/src/graph.py`, `brain/src/__main__.py`, `brain/tests/test_{graph,main}.py` (modify) | Pending |
+| 4f | Phase 4 acceptance gate — live smoke for a multi-step goal | `body/test/smoke/` extensions | Pending |
+
+Plus AgentState v2 (add `guide: dict` field) — lands as part of 4a.
+
+### Open Phase 4 micro-decisions
+
+1. Final 5 seed SOPs (suggested: oak_planks / stick / crafting_table / wooden_pickaxe / stone_pickaxe — linear chain exercising scaling).
+2. Sprint 4f smoke goal (suggested: "craft 1 oak_planks" or "make 4 sticks").
+
+---
+
+## Open follow-ups (low priority, deferrable)
+
 - `Result:` line cosmetically renders Gemini 3.x structured-content list — extract `.text` for plain display.
 - `LangChainPendingDeprecationWarning` from langgraph's import surfaces on stderr; silence at brain entry.
 - In-world chat control pane (Decision 28) deferred to Phase 3.5 / Phase 8.
+- `AGENTS.md` at repo root — untracked Codex-style sibling of CLAUDE.md; keep / delete / formalize TBD.
+- Hard-prereq SOP schema flag (`acquire: prerequisite` vs `acquire: derived`) deferred to Phase 5 per D33.
 
 ---
 
 ## Phases ahead
 
-4. Knowledge (SOP + Guide Retriever)
+4. Knowledge (SOP + LLM-router Guide Retriever) — design complete, implementation next
 5. Resilience (Reflexion + retries)
 6. Construction (stretch)
-7. Polish (Streamlit, ChromaDB)
+7. Polish (Streamlit, ChromaDB — may not be needed post-D30)
