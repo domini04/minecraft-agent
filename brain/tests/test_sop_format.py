@@ -209,11 +209,11 @@ def test_sop_count():
     )
 
 
-def test_no_index_yaml_yet():
-    """index.yaml does not exist yet — it is Sprint 4b's deliverable."""
+def test_index_yaml_exists_after_sprint_4b():
+    """index.yaml exists — Sprint 4b produced the auto-generated catalog."""
     index_path = _SOPS_DIR / "index.yaml"
-    assert not index_path.exists(), (
-        f"index.yaml must not exist until Sprint 4b; found at {index_path}"
+    assert index_path.exists(), (
+        f"index.yaml should exist after Sprint 4b; not found at {index_path}"
     )
 
 
