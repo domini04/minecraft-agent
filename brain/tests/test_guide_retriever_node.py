@@ -160,7 +160,7 @@ def test_cache_hit_no_llm_call(tmp_path):
     new_state = guide_retriever_node(state, llm=stub, cache=cache, use_cache=True)
 
     assert len(stub.invoke_args) == 0, "LLM should NOT be called on cache HIT"
-    expected = scale_sop(catalog["oak_planks"], 1)
+    expected = {**scale_sop(catalog["oak_planks"], 1), "count": 1}
     assert new_state["guide"] == expected
 
 
@@ -182,7 +182,7 @@ def test_cache_miss_valid_llm_response(tmp_path):
     new_state = guide_retriever_node(state, llm=stub, cache=cache, use_cache=True)
 
     assert len(stub.invoke_args) == 1
-    expected = scale_sop(catalog["oak_planks"], 1)
+    expected = {**scale_sop(catalog["oak_planks"], 1), "count": 1}
     assert new_state["guide"] == expected
 
     # Cache should have the entry
@@ -218,7 +218,7 @@ def test_cache_miss_retry_success(tmp_path):
     retry_system_content = stub.invoke_args[1][0].content
     assert "Respond with EXACTLY" in retry_system_content
 
-    expected = scale_sop(catalog["stick"], 2)
+    expected = {**scale_sop(catalog["stick"], 2), "count": 2}
     assert new_state["guide"] == expected
 
 
@@ -343,7 +343,7 @@ def test_cache_hit_null_count_defaults_to_1(tmp_path):
     new_state = guide_retriever_node(state, llm=stub, cache=fresh_cache, use_cache=True)
 
     assert len(stub.invoke_args) == 0
-    expected = scale_sop(catalog["stick"], 1)
+    expected = {**scale_sop(catalog["stick"], 1), "count": 1}
     assert new_state["guide"] == expected
 
 
@@ -402,7 +402,7 @@ def test_code_fence_json_parsed_correctly(tmp_path):
     new_state = guide_retriever_node(state, llm=stub, cache=cache, use_cache=True)
 
     assert len(stub.invoke_args) == 1  # parsed on first try, no retry
-    expected = scale_sop(catalog["oak_planks"], 1)
+    expected = {**scale_sop(catalog["oak_planks"], 1), "count": 1}
     assert new_state["guide"] == expected
 
 
@@ -515,7 +515,44 @@ def test_inventory_independence_d33(tmp_path):
     assert len(stub_a.invoke_args) == 0
     assert len(stub_b.invoke_args) == 0
 
-    expected = scale_sop(catalog["oak_planks"], 1)
+    expected = {**scale_sop(catalog["oak_planks"], 1), "count": 1}
     assert result_a["guide"] == expected
     assert result_b["guide"] == expected
     assert result_a["guide"] == result_b["guide"]
+
+
+# ---------------------------------------------------------------------------
+# R-T14: Cache MISS branch attaches count field
+# ---------------------------------------------------------------------------
+
+
+def test_guide_has_count_field(tmp_path):
+    """R-T14: scaled guide dict carries a 'count' key for planner ×N rendering."""
+    cache = _make_cache(tmp_path)
+    stub = StubLLM(
+        responses=[AIMessage(content='{"sop_name":"stone_pickaxe","count":5}')]
+    )
+    state = _make_state("craft 5 stone pickaxes")
+
+    new_state = guide_retriever_node(state, llm=stub, cache=cache, use_cache=True)
+
+    assert new_state["guide"]["count"] == 5
+    assert new_state["guide"]["name"] == "Stone Pickaxe"
+
+
+# ---------------------------------------------------------------------------
+# R-T15: Cache HIT branch attaches count field
+# ---------------------------------------------------------------------------
+
+
+def test_guide_has_count_field_on_cache_hit(tmp_path):
+    """R-T15: cache-hit branch also tags the materialized guide with count."""
+    cache = _make_cache(tmp_path)
+    cache.set("craft stone pickaxes", "stone_pickaxe", 3)
+    stub = StubLLM(responses=[])
+
+    state = _make_state("craft stone pickaxes")
+    new_state = guide_retriever_node(state, llm=stub, cache=cache, use_cache=True)
+
+    assert len(stub.invoke_args) == 0
+    assert new_state["guide"]["count"] == 3

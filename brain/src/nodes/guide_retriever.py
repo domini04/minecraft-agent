@@ -164,7 +164,9 @@ def _materialize(hit: dict, catalog: dict[str, dict]) -> dict:
         return {}
     count = hit.get("count")
     n = count if isinstance(count, int) and not isinstance(count, bool) and count > 0 else 1
-    return scale_sop(catalog[sop_name], n)
+    scaled = scale_sop(catalog[sop_name], n)
+    scaled["count"] = n  # planner uses this for ×N notation
+    return scaled
 
 
 # ---------------------------------------------------------------------------
@@ -260,5 +262,7 @@ def guide_retriever_node(
     else:
         sop = catalog[sop_name]
         n = count if count is not None else 1
-        new_state["guide"] = scale_sop(sop, n)
+        scaled = scale_sop(sop, n)
+        scaled["count"] = n  # planner uses this for ×N notation
+        new_state["guide"] = scaled
     return new_state

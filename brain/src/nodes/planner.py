@@ -50,8 +50,54 @@ _SYSTEM_PROMPT = (
     "\n"
     "You will see a list of steps already executed in this session (most recent first), each with the tool name, the args you chose last time, and the outcome. Use this history together with the bot's current state to recognize when the goal is already satisfied — in that case, return no tool call (you may include a brief textual confirmation). Do not repeat a tool call that already succeeded and accomplished the goal.\n"  # noqa: E501
     "\n"
-    "The six available tools are bound to this conversation via the function-calling interface; use them. Do not narrate, do not plan multiple steps ahead, and do not return multiple tool calls — return exactly one tool call (or none)."  # noqa: E501
+    "The six available tools are bound to this conversation via the function-calling interface; use them. Do not narrate, do not plan multiple steps ahead, and do not return multiple tool calls — return exactly one tool call (or none).\n"  # noqa: E501
+    "\n"
+    "If an Active guide is provided, treat it as a recommended recipe. Compare its required materials and steps against the bot's current inventory and step history; skip steps already satisfied; deviate from the guide if the current state warrants it."  # noqa: E501
 )
+
+
+def _format_guide_block(guide: dict) -> str:
+    """Render the 'Active guide:' block from a scaled guide dict.
+
+    Output shape::
+
+        Active guide: <display_name> (×<count>)
+          Required materials: <item1>×<n1>, <item2>×<n2>, ...
+          Steps:
+            1. <action> <target_or_item> ×<count_per_unit>
+            ...
+
+    The multiplier character is Unicode × (U+00D7), not ASCII x.
+    """
+    display_name = guide.get("name", "<unnamed SOP>")
+    count = guide.get("count")
+    count_str = str(count) if isinstance(count, int) and not isinstance(count, bool) else "?"
+
+    requires = guide.get("requires") or []
+    if requires:
+        materials_parts = [f"{r['item']}×{r['count_per_unit']}" for r in requires]
+        materials_line = f"  Required materials: {', '.join(materials_parts)}"
+    else:
+        materials_line = "  Required materials: (none)"
+
+    steps = guide.get("steps") or []
+    step_lines: list[str] = ["  Steps:"]
+    for i, step in enumerate(steps, start=1):
+        action = step.get("action", "?")
+        if action == "mine":
+            target_or_item = step.get("target", "?")
+        else:
+            target_or_item = step.get("item") or step.get("target") or "?"
+        cpu = step.get("count_per_unit", "?")
+        step_lines.append(f"    {i}. {action} {target_or_item} ×{cpu}")
+
+    steps_block = "\n".join(step_lines)
+
+    return (
+        f"Active guide: {display_name} (×{count_str})\n"
+        f"{materials_line}\n"
+        f"{steps_block}"
+    )
 
 
 def _format_step_history(step_results: list[dict], plan: list[dict]) -> str:
@@ -144,26 +190,15 @@ def _format_human_message(
     bot_status: dict,
     step_results: list[dict],
     plan: list[dict],
+    guide: dict | None = None,
 ) -> str:
     """Render the compact human-message template fed to the Planner LLM.
 
-    Format (frozen):
-
-        Goal: <goal>
-
-        Bot status:
-        - position: <x=..., y=..., z=...> | unknown
-        - health: <value> | unknown
-        - food: <value> | unknown
-        - inventory: <name1, name2, ...> | empty
-
-        Steps already executed (most recent first):
-          (no steps executed yet)
-          | [N] tool_name(k=repr(v), ...) -> success
-          | [N] tool_name(...) -> error: <CODE> "<MESSAGE>"
-
-        Decide the next single tool call. If the goal is already satisfied
-        based on the steps above and the bot status, return no tool call.
+    When ``guide`` is truthy, an 'Active guide:' block is inserted between
+    the inventory line and the step history, and the final instruction
+    sentence switches to the inventory-compare variant. When ``guide`` is
+    falsy (None, {}, or absent), the output is byte-identical to the
+    Phase-3 layout.
 
     Position is rendered numerically without rounding when ``bot_status``
     carries a ``{"x", "y", "z"}`` sub-dict; otherwise ``unknown``. Inventory
@@ -194,6 +229,16 @@ def _format_human_message(
 
     history_block = _format_step_history(step_results, plan)
 
+    guide_section = ""
+    final_instruction = (
+        "Decide the next single tool call. If the goal is already satisfied based on the steps above and the bot status, return no tool call."  # noqa: E501
+    )
+    if guide:
+        guide_section = f"{_format_guide_block(guide)}\n\n"
+        final_instruction = (
+            "Decide the next single tool call. Compare required materials to your current inventory; skip steps already satisfied. If the goal is fully satisfied, return no tool call."  # noqa: E501
+        )
+
     return (
         f"Goal: {goal}\n"
         "\n"
@@ -203,9 +248,10 @@ def _format_human_message(
         f"- food: {food_str}\n"
         f"- inventory: {inventory_str}\n"
         "\n"
+        f"{guide_section}"
         f"{history_block}\n"
         "\n"
-        "Decide the next single tool call. If the goal is already satisfied based on the steps above and the bot status, return no tool call."  # noqa: E501
+        f"{final_instruction}"
     )
 
 
@@ -245,6 +291,7 @@ def planner_node(
             new_state.get("bot_status", {}) or {},
             list(new_state.get("step_results", []) or []),
             list(new_state.get("plan", []) or []),
+            new_state.get("guide") or None,
         )
     )
     response = bound.invoke([system, human])

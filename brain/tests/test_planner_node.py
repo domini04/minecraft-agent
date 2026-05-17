@@ -372,7 +372,9 @@ _FROZEN_SYSTEM_PROMPT = (
     "\n"
     "You will see a list of steps already executed in this session (most recent first), each with the tool name, the args you chose last time, and the outcome. Use this history together with the bot's current state to recognize when the goal is already satisfied — in that case, return no tool call (you may include a brief textual confirmation). Do not repeat a tool call that already succeeded and accomplished the goal.\n"  # noqa: E501
     "\n"
-    "The six available tools are bound to this conversation via the function-calling interface; use them. Do not narrate, do not plan multiple steps ahead, and do not return multiple tool calls — return exactly one tool call (or none)."  # noqa: E501
+    "The six available tools are bound to this conversation via the function-calling interface; use them. Do not narrate, do not plan multiple steps ahead, and do not return multiple tool calls — return exactly one tool call (or none).\n"  # noqa: E501
+    "\n"
+    "If an Active guide is provided, treat it as a recommended recipe. Compare its required materials and steps against the bot's current inventory and step history; skip steps already satisfied; deviate from the guide if the current state warrants it."  # noqa: E501
 )
 
 
@@ -477,6 +479,126 @@ def test_planner_increments_iteration_count_on_each_branch():
     s = _initial_state(goal="g", iteration_count=2)
     out = planner_node(s, llm=StubLLM(bad_resp))
     assert out["iteration_count"] == 3
+
+
+# ---------- G1–G4: guide-aware human message rendering ----------
+
+
+def test_planner_human_message_renders_active_guide_header():
+    """G1: state.guide populated -> human message contains 'Active guide: <name> (×<count>)'."""
+    response = AIMessage(content="", tool_calls=[])
+    stub = StubLLM(response)
+    state = _initial_state(goal="make 5 stone pickaxes")
+    state["guide"] = {
+        "name": "Stone Pickaxe",
+        "count": 5,
+        "yields": 5,
+        "requires": [
+            {"item": "oak_log", "count_per_unit": 15},
+            {"item": "cobblestone", "count_per_unit": 15},
+        ],
+        "steps": [
+            {"action": "mine", "target": "oak_log", "count_per_unit": 15},
+            {"action": "craft", "item": "stone_pickaxe", "count_per_unit": 5},
+        ],
+    }
+
+    planner_node(state, llm=stub)
+
+    human_content = stub.invoke_args[0][1].content
+    assert "Active guide: Stone Pickaxe (×5)" in human_content
+
+
+def test_planner_human_message_renders_required_materials_and_steps():
+    """G2/G3/G4: required materials line, numbered steps, inventory-compare instruction."""
+    response = AIMessage(content="", tool_calls=[])
+    stub = StubLLM(response)
+    state = _initial_state(goal="make 5 stone pickaxes")
+    state["guide"] = {
+        "name": "Stone Pickaxe",
+        "count": 5,
+        "yields": 5,
+        "requires": [
+            {"item": "oak_log", "count_per_unit": 15},
+            {"item": "cobblestone", "count_per_unit": 15},
+        ],
+        "steps": [
+            {"action": "mine", "target": "oak_log", "count_per_unit": 15},
+            {"action": "craft", "item": "oak_planks", "count_per_unit": 30},
+            {"action": "craft", "item": "stick", "count_per_unit": 10},
+            {"action": "craft", "item": "crafting_table", "count_per_unit": 1, "scale": False},
+            {"action": "craft", "item": "wooden_pickaxe", "count_per_unit": 1, "scale": False},
+            {"action": "mine", "target": "stone", "count_per_unit": 15},
+            {"action": "craft", "item": "stone_pickaxe", "count_per_unit": 5},
+        ],
+    }
+
+    planner_node(state, llm=stub)
+
+    human_content = stub.invoke_args[0][1].content
+    # Required-materials line (item×N format)
+    assert "Required materials: oak_log×15, cobblestone×15" in human_content
+    # Numbered steps with action verb + target/item + count
+    assert "1. mine oak_log ×15" in human_content
+    assert "2. craft oak_planks ×30" in human_content
+    assert "3. craft stick ×10" in human_content
+    assert "4. craft crafting_table ×1" in human_content
+    assert "5. craft wooden_pickaxe ×1" in human_content
+    assert "6. mine stone ×15" in human_content
+    assert "7. craft stone_pickaxe ×5" in human_content
+    # Inventory-compare instruction sentence at the bottom
+    assert "Compare required materials to your current inventory" in human_content
+    assert "skip steps already satisfied" in human_content
+
+
+def test_planner_human_message_no_guide_is_phase3_byteequivalent():
+    """G3 (C7): state.guide={} -> human message has NO 'Active guide:' block.
+
+    Asserts byte-equivalence by computing what the Phase-3 layout WOULD produce
+    given the same goal/status and comparing as a substring (the rendered
+    message contains nothing beyond the Phase-3 layout).
+    """
+    response = AIMessage(content="", tool_calls=[])
+    stub = StubLLM(response)
+    state = _initial_state(
+        goal="say hi",
+        bot_status={
+            "position": {"x": 0, "y": 64, "z": 0},
+            "health": 20,
+            "food": 18,
+            "inventory": [{"name": "oak_log", "count": 2}],
+        },
+    )
+    state["guide"] = {}
+
+    planner_node(state, llm=stub)
+
+    human_content = stub.invoke_args[0][1].content
+    # No guide block
+    assert "Active guide:" not in human_content
+    assert "Required materials:" not in human_content
+    # Phase-3 final instruction (NOT the inventory-compare variant)
+    assert "If the goal is already satisfied based on the steps above and the bot status" in human_content
+    assert "Compare required materials to your current inventory" not in human_content
+
+
+def test_planner_human_message_guide_key_absent_is_phase3_byteequivalent():
+    """G4 (C8): state has no 'guide' key -> human message has NO 'Active guide:' block.
+
+    Same expected behavior as guide={}. Tests the .get(...) fallback path.
+    """
+    response = AIMessage(content="", tool_calls=[])
+    stub = StubLLM(response)
+    state = _initial_state(goal="say hi")
+    # Forcibly remove the guide key (make_initial_state seeds it, so pop)
+    state.pop("guide", None)
+
+    planner_node(state, llm=stub)
+
+    human_content = stub.invoke_args[0][1].content
+    assert "Active guide:" not in human_content
+    assert "Required materials:" not in human_content
+    assert "Compare required materials to your current inventory" not in human_content
 
 
 # ---------- P10: no-network import surface ----------
