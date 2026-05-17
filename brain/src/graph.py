@@ -1,9 +1,9 @@
-"""Phase-3 LangGraph wiring: planner -> executor loop.
+"""Phase-4 LangGraph wiring: guide_retriever -> planner -> executor loop.
 
-This module compiles the Phase-3 ``StateGraph`` that drives a single
+This module compiles the Phase-4 ``StateGraph`` that drives a single
 goal-resolution run. The topology is::
 
-    START -> planner
+    START -> guide_retriever -> planner
     planner --conditional--> {executor, END}
     executor --conditional--> {planner, END}
 
@@ -25,6 +25,11 @@ when the caller supplies them (test seam). Production runs pass
 ``None`` and the planner / executor nodes resolve their dependencies
 lazily on first invocation. This keeps ``requests`` and
 ``langchain_google_genai`` out of ``sys.modules`` at module load time.
+
+The ``guide_retriever`` node runs exactly once per ``invoke()`` call
+because the executor → planner loop skips back to ``planner``, not to
+``guide_retriever``. This structural guarantee means SOP lookup happens
+once per goal, regardless of how many planner ↔ executor iterations follow.
 """
 
 from __future__ import annotations
@@ -35,6 +40,7 @@ from typing import TYPE_CHECKING
 from langgraph.graph import END, START, StateGraph
 
 from src.nodes.executor import executor_node
+from src.nodes.guide_retriever import guide_retriever_node
 from src.nodes.planner import planner_node
 from src.state import MAX_ITERATIONS, AgentState, make_initial_state
 
@@ -42,6 +48,7 @@ if TYPE_CHECKING:
     from langchain_core.language_models import BaseChatModel
 
     from src.body_client import BodyClient
+    from src.sops.cache import SOPRouteCache
 
 
 def _should_continue_after_planner(state: AgentState) -> str:
@@ -94,13 +101,17 @@ def build_graph(
     llm: "BaseChatModel | None" = None,
     body_client: "BodyClient | None" = None,
     announce: bool | None = None,
+    *,
+    use_cache: bool = True,
+    cache: "SOPRouteCache | None" = None,
 ):
-    """Compile the Phase-3 planner -> executor LangGraph.
+    """Compile the Phase-4 guide_retriever -> planner -> executor LangGraph.
 
     Args:
         llm: Optional pre-bound chat model. When non-None, injected into
-            the planner node via ``functools.partial``. When None, the
-            planner resolves its own LLM lazily on first invocation.
+            the planner node via ``functools.partial`` and into the
+            guide_retriever node via closure. When None, each node
+            resolves its own LLM lazily on first invocation.
         body_client: Optional ``BodyClient`` (or stub). When non-None,
             injected into the executor node via ``functools.partial``.
             When None, the executor constructs a real ``BodyClient``
@@ -110,12 +121,40 @@ def build_graph(
             and overrides the ``BRAIN_ANNOUNCE`` env var. When ``None``,
             the executor reads ``BRAIN_ANNOUNCE`` at invocation time
             (default ON when env unset).
+        use_cache: When ``True`` (the default), the guide_retriever
+            consults the persistent ``SOPRouteCache`` to short-circuit
+            repeat LLM calls. When ``False``, cache read and write are
+            both bypassed and the LLM is called every time. Pass
+            ``False`` to force a fresh routing decision (useful when
+            iterating on SOPs or debugging routing).
+        cache: Optional ``SOPRouteCache`` instance injected as a test
+            seam. When ``None`` and ``use_cache=True``, ``build_graph``
+            lazily constructs a real ``SOPRouteCache()`` (which reads
+            ``brain/.cache/sop_routes.json``). When ``use_cache=False``,
+            this argument is accepted but not used (cache is bypassed in
+            the node). Tests always inject a stub here; production code
+            leaves it as ``None``.
 
     Returns:
         A compiled LangGraph (``CompiledStateGraph``). Call
         ``.invoke(state, ...)`` to drive a single goal-resolution run.
         The graph is stateless across invocations.
     """
+    # ---- Resolve cache object before building the retriever closure ----
+    # Lazy import avoids reading brain/.cache/sop_routes.json when use_cache=False.
+    if cache is None and use_cache:
+        from src.sops.cache import SOPRouteCache
+        cache_obj: "SOPRouteCache | None" = SOPRouteCache()
+    else:
+        cache_obj = cache  # may be None when use_cache=False; node handles it
+
+    # ---- Build the guide_retriever closure (binds llm, cache, use_cache) ----
+    def _retriever_call(state):
+        return guide_retriever_node(
+            state, llm=llm, cache=cache_obj, use_cache=use_cache,
+        )
+
+    # ---- Planner and executor bindings (unchanged from Phase 3) ----
     planner_fn = partial(planner_node, llm=llm) if llm is not None else planner_node
     if body_client is not None or announce is not None:
         executor_kwargs: dict = {}
@@ -128,9 +167,11 @@ def build_graph(
         executor_fn = executor_node
 
     graph = StateGraph(AgentState)
+    graph.add_node("guide_retriever", _retriever_call)   # NEW Phase-4 entry node
     graph.add_node("planner", planner_fn)
     graph.add_node("executor", executor_fn)
-    graph.add_edge(START, "planner")
+    graph.add_edge(START, "guide_retriever")              # CHANGED: was START → planner
+    graph.add_edge("guide_retriever", "planner")          # NEW: unconditional, runs once
     graph.add_conditional_edges(
         "planner",
         _should_continue_after_planner,
@@ -149,6 +190,8 @@ def run_goal(
     llm: "BaseChatModel | None" = None,
     body_client: "BodyClient | None" = None,
     announce: bool | None = None,
+    *,
+    use_cache: bool = True,
 ) -> AgentState:
     """Build the graph, seed initial state, invoke once, return final state.
 
@@ -161,10 +204,20 @@ def run_goal(
         announce: Optional override for pre-action chat narration
             (Sprint 3k). See ``build_graph`` for semantics. ``None``
             defers to ``BRAIN_ANNOUNCE`` env var (default ON).
+        use_cache: Forwarded to ``build_graph``. When ``False``, the
+            guide_retriever bypasses the persistent ``SOPRouteCache`` and
+            always calls the LLM. The ``cache=`` test seam is only
+            available on ``build_graph`` directly (tests that need it call
+            ``build_graph`` rather than ``run_goal``).
 
     Returns:
         The final ``AgentState`` dict after the graph terminates.
     """
     initial = make_initial_state(goal)
-    graph = build_graph(llm=llm, body_client=body_client, announce=announce)
+    graph = build_graph(
+        llm=llm,
+        body_client=body_client,
+        announce=announce,
+        use_cache=use_cache,
+    )
     return graph.invoke(initial, config={"recursion_limit": 50})

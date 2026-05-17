@@ -92,6 +92,16 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--no-cache",
+        dest="no_cache",
+        action="store_true",
+        help=(
+            "Bypass the Guide Retriever's persistent route cache. Forces a "
+            "live LLM call on every run. Useful when iterating on SOPs or "
+            "debugging routing decisions."
+        ),
+    )
+    parser.add_argument(
         "-v",
         "--verbose",
         action="store_true",
@@ -245,6 +255,7 @@ def main(
             llm=llm,
             body_client=body_client,
             announce=announce,
+            use_cache=not args.no_cache,
         )
     except Exception as exc:  # noqa: BLE001
         print(f"error: run failed: {exc!r}", file=sys.stderr)

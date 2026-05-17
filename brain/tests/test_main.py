@@ -542,5 +542,74 @@ def test_main_announce_default_on_fires_chat(monkeypatch, capsys):
     assert stub_body.calls[1] == ("navigate", {"x": 1, "y": 64, "z": 2})
 
 
+# ========== Sprint 4e: --no-cache CLI flag (T15, T16, T17) ==========
+
+
+def test_main_no_cache_flag_plumbs_use_cache_false(monkeypatch, capsys):
+    """T15: --no-cache is parsed and forwards use_cache=False to run_goal.
+
+    Spies on src.graph.run_goal (the attribute the lazy import in main() resolves
+    to) so we can assert the kwarg without exercising the real graph.
+    """
+    captured = {}
+
+    def spy_run_goal(goal, *, llm=None, body_client=None, announce=None, use_cache=True):
+        captured["use_cache"] = use_cache
+        # Return a minimal terminal state so main() can render a summary.
+        return {
+            "goal": goal,
+            "iteration_count": 1,
+            "step_results": [],
+            "result": "done",
+        }
+
+    monkeypatch.setattr("src.graph.run_goal", spy_run_goal)
+    stub_llm = StubLLM([AIMessage(content="done", tool_calls=[])])
+    stub_body = StubBodyClient(response=None)
+
+    rc = main(["g", "--no-cache"], llm=stub_llm, body_client=stub_body)
+    capsys.readouterr()  # drain output
+    assert rc == 0
+    assert captured == {"use_cache": False}
+
+
+def test_main_no_cache_flag_parsed_in_help():
+    """T16: ``python -m src --help`` output contains --no-cache."""
+    result = subprocess.run(
+        [sys.executable, "-m", "src", "--help"],
+        cwd=str(BRAIN_DIR),
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0
+    assert "--no-cache" in result.stdout
+
+
+def test_main_default_use_cache_true(monkeypatch, capsys):
+    """T17: without --no-cache, run_goal receives use_cache=True (the default).
+
+    Guards against accidentally inverting the bool in main().
+    """
+    captured = {}
+
+    def spy_run_goal(goal, *, llm=None, body_client=None, announce=None, use_cache=True):
+        captured["use_cache"] = use_cache
+        return {
+            "goal": goal,
+            "iteration_count": 1,
+            "step_results": [],
+            "result": "done",
+        }
+
+    monkeypatch.setattr("src.graph.run_goal", spy_run_goal)
+    stub_llm = StubLLM([AIMessage(content="done", tool_calls=[])])
+    stub_body = StubBodyClient(response=None)
+
+    rc = main(["g"], llm=stub_llm, body_client=stub_body)
+    capsys.readouterr()
+    assert rc == 0
+    assert captured == {"use_cache": True}
+
+
 if __name__ == "__main__":  # pragma: no cover - manual invocation aid
     sys.exit(pytest.main([__file__, "-v"]))
