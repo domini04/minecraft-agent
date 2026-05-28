@@ -323,7 +323,319 @@ async function runBrainSmoke(ctx) {
   };
 }
 
+// ---------------------------------------------------------------------------
+// Phase 4 helpers — ADDITIVE ONLY. Phase-3 exports above are untouched.
+// ---------------------------------------------------------------------------
+
+/**
+ * Budget constants for the Phase-4 scenario.
+ */
+const P4_ITERATION_BUDGET = 5; // P7: loose upper bound; expected ~3.
+const P4_BRAIN_TIMEOUT_MS = 240_000; // slightly more headroom for retrieval LLM call.
+
+/**
+ * Count oak_log items in an inventory array (from get_bot_status envelope).
+ * The inventory field is an array of `{ name: string, count: number }`.
+ *
+ * @param {object|null} statusData  - The `.data` field from the /execute response.
+ * @returns {number}                - Total oak_log count (0 if not found).
+ */
+function countOakLogs(statusData) {
+  if (!statusData || !Array.isArray(statusData.inventory)) return 0;
+  return statusData.inventory
+    .filter((item) => item && item.name === 'oak_log')
+    .reduce((sum, item) => sum + (item.count || 0), 0);
+}
+
+/**
+ * Parse the first craft step from the step lines.
+ * Returns the step data or null if no craft step is found.
+ *
+ * Step line format (frozen in brain/src/__main__.py):
+ *   "  [<idx>] craft           success=True   data=<...>"
+ *
+ * @param {string[]} stepLines
+ * @returns {{idx: number, success: boolean, dataTail: string,
+ *            itemValue: string|null}|null}
+ */
+function parseCraftStep(stepLines) {
+  // Tool name is space-padded to _TOOL_PAD=16; allow any whitespace.
+  const re = /^\s*\[(\d+)\]\s+craft\s+(success=(True|False))\s+(data=.+)$/;
+  for (const line of stepLines) {
+    const m = re.exec(line);
+    if (m) {
+      const idx = parseInt(m[1], 10);
+      const success = m[3] === 'True';
+      const dataTail = m[4];
+      // Extract item= value (e.g. data=item=oak_planks,count=1)
+      const itemM = /\bitem=([^,]+)/.exec(dataTail);
+      const itemValue = itemM ? itemM[1] : null;
+      return { idx, success, dataTail, itemValue };
+    }
+  }
+  return null;
+}
+
+/**
+ * Determine the "first non-status step" tool name from the step list.
+ * If the planner started with a get_bot_status call, skip it.
+ *
+ * @param {string[]} stepLines
+ * @returns {string|null}  tool name of the first non-get_bot_status step.
+ */
+function firstNonStatusTool(stepLines) {
+  const re = /^\s*\[(\d+)\]\s+(\S+)/;
+  for (const line of stepLines) {
+    const m = re.exec(line);
+    if (m) {
+      const tool = m[2];
+      if (tool !== 'get_bot_status') return tool;
+    }
+  }
+  return null;
+}
+
+/**
+ * Check whether the verbose state dump (printed after the summary when
+ * --verbose is set) contains a non-empty 'guide' field.
+ *
+ * Heuristic: look for `'guide':` followed by a `{` (populated dict) somewhere
+ * in stdout. An empty dict `{}` means the retriever ran but found nothing —
+ * that would be a bug for the oak_planks goal.
+ *
+ * @param {string} stdout
+ * @returns {boolean}
+ */
+function guideIsPopulated(stdout) {
+  // Look for 'guide': { ... (non-empty dict contents before closing brace).
+  // pprint may put the opening brace on the same line or the next line.
+  // Strategy: find 'guide': and check that the following characters are not {}
+  const guideIdx = stdout.indexOf("'guide':");
+  if (guideIdx === -1) return false;
+  const tail = stdout.slice(guideIdx + "'guide':".length);
+  // Strip whitespace up to the first meaningful token.
+  const firstChar = tail.trimStart();
+  // If it starts with {} that means empty dict — not populated.
+  if (firstChar.startsWith('{}')) return false;
+  // If it starts with { followed by a non-}, it's populated.
+  if (firstChar.startsWith('{')) return true;
+  // pprint may produce a multi-line dict — if the brace is on the next line
+  // and the next token is not }, it's populated.
+  return false;
+}
+
+/**
+ * Build Phase-4 assertion verdicts from a raw brain CLI run.
+ * Pure function — no I/O.
+ *
+ * Assertions:
+ *   P1 — brain CLI exits 0.
+ *   P2 — guide_retriever ran (guide field present in verbose dump).
+ *   P3 — state.guide non-empty (same evidence as P2 but explicitly asserted).
+ *   P4 — planner picks craft as first tool call (first non-status step).
+ *   P5 — craft step has success=True.
+ *   P6 — clean termination: iteration_count >= 2 AND stepsCount matches stepLines.
+ *   P7 — iterations <= P4_ITERATION_BUDGET (5).
+ *
+ * @param {{exitCode: number|null, stdout: string, stderr: string}} run
+ * @returns {{
+ *   verdict: 'PASS'|'FAIL',
+ *   reasons: string[],
+ *   assertions: Record<string, 'PASS'|'FAIL'>,
+ *   iterationCount: number|null,
+ *   stepsCount: number|null,
+ *   craftStepData: string|null,
+ *   finalResultLine: string|null,
+ * }}
+ */
+function assertSmokePhase4(run) {
+  const { exitCode, stdout, stderr } = run;
+  const summary = parseSummary(stdout);
+  const craftStep = parseCraftStep(summary.stepLines);
+  const firstTool = firstNonStatusTool(summary.stepLines);
+  const populated = guideIsPopulated(stdout);
+
+  const assertions = {
+    P1_exit0: exitCode === 0 ? 'PASS' : 'FAIL',
+    P2_retrieverRan: populated ? 'PASS' : 'FAIL',
+    P3_guidePopulated: populated ? 'PASS' : 'FAIL',
+    P4_firstStepCraft: 'FAIL',
+    P5_craftSucceeded: 'FAIL',
+    P6_terminationClean: 'FAIL',
+    P7_iterationsBudget: 'FAIL',
+  };
+  const reasons = [];
+
+  if (assertions.P1_exit0 === 'FAIL') {
+    reasons.push(`P1: brain CLI exited with code ${exitCode} (expected 0)`);
+  }
+
+  if (assertions.P2_retrieverRan === 'FAIL') {
+    reasons.push('P2: guide_retriever did not produce a populated guide (guide empty or missing in verbose dump)');
+  }
+  // P3 same evidence — if P2 failed P3 also fails; reasons already added via P2.
+  if (assertions.P3_guidePopulated === 'FAIL' && assertions.P2_retrieverRan === 'PASS') {
+    reasons.push("P3: 'guide' field missing or empty in verbose state dump");
+  }
+
+  // P4: first non-status tool call must be 'craft'.
+  if (firstTool === 'craft') {
+    assertions.P4_firstStepCraft = 'PASS';
+  } else if (firstTool === null) {
+    reasons.push('P4: no tool calls found in step list');
+  } else {
+    reasons.push(`P4: first non-status tool was "${firstTool}", expected "craft"`);
+  }
+
+  // P5: craft step must have success=True.
+  if (craftStep && craftStep.success) {
+    assertions.P5_craftSucceeded = 'PASS';
+  } else if (!craftStep) {
+    reasons.push('P5: no craft step found in step list');
+  } else {
+    reasons.push(`P5: craft step had success=False; data=${craftStep.dataTail}`);
+  }
+
+  // P6: clean termination — at least 2 iterations (retriever + at least one
+  // action + done check) AND Steps header matches actual step lines count.
+  const iterationsOk = summary.iterationCount !== null && summary.iterationCount >= 2;
+  const stepsMatch = summary.stepsCount !== null
+    && summary.stepsCount === summary.stepLines.length;
+  if (iterationsOk && stepsMatch) {
+    assertions.P6_terminationClean = 'PASS';
+  } else {
+    if (!iterationsOk) {
+      reasons.push(`P6: iteration_count=${summary.iterationCount} (expected >=2 for clean termination)`);
+    }
+    if (!stepsMatch) {
+      reasons.push(`P6: Steps header (${summary.stepsCount}) != actual step lines (${summary.stepLines.length})`);
+    }
+  }
+
+  // P7: iterations within budget.
+  if (summary.iterationCount !== null && summary.iterationCount <= P4_ITERATION_BUDGET) {
+    assertions.P7_iterationsBudget = 'PASS';
+  } else if (summary.iterationCount === null) {
+    reasons.push('P7: could not parse "Iterations:" line');
+  } else {
+    reasons.push(`P7: iteration_count=${summary.iterationCount} exceeded budget=${P4_ITERATION_BUDGET}`);
+  }
+
+  // Verdict: all 7 assertions gate.
+  const allPass = Object.values(assertions).every((v) => v === 'PASS');
+
+  return {
+    verdict: allPass ? 'PASS' : 'FAIL',
+    reasons,
+    assertions,
+    iterationCount: summary.iterationCount,
+    stepsCount: summary.stepsCount,
+    craftStepData: craftStep ? craftStep.dataTail : null,
+    finalResultLine: summary.resultLine,
+  };
+}
+
+/**
+ * Spawn `python3 -m src "craft 1 oak_planks" --verbose --no-cache` from
+ * brain/ and capture output. Returns raw process result merged with
+ * assertSmokePhase4() verdicts.
+ *
+ * @param {object} ctx
+ * @param {object} ctx.config   smoke-harness config (botHost, botPort, ...)
+ * @param {string} [ctx.runId]  optional run ID for logging
+ * @param {object} [ctx.env]    extra env (merged over process.env)
+ * @returns {Promise<{
+ *   exitCode: number|null,
+ *   stdout: string,
+ *   stderr: string,
+ *   durationMs: number,
+ *   command: string,
+ *   cwd: string,
+ *   verdict: string,
+ *   reasons: string[],
+ *   assertions: object,
+ *   iterationCount: number|null,
+ *   stepsCount: number|null,
+ *   craftStepData: string|null,
+ *   finalResultLine: string|null,
+ * }>}
+ */
+async function runPhase4Smoke(ctx) {
+  const { config } = ctx;
+  const repoRoot = path.resolve(__dirname, '..', '..', '..');
+  const brainCwd = path.join(repoRoot, 'brain');
+  const py = resolveBrainPython(repoRoot);
+
+  if (!fs.existsSync(py)) {
+    throw new Error(`brain venv python not found at ${py}`);
+  }
+
+  const childEnv = {
+    ...process.env,
+    ...(ctx.env || {}),
+    BOT_HOST: config.botHost,
+    BOT_PORT: String(config.botPort),
+    BOT_URL: `http://${config.botHost}:${config.botPort}`,
+    PYTHONUNBUFFERED: '1',
+  };
+
+  // Goal + flags as required by C3.
+  const GOAL = 'craft 1 oak_planks';
+  const args = ['-m', 'src', GOAL, '--verbose', '--no-cache'];
+  const command = `${py} ${args.map((a) => (a.includes(' ') ? JSON.stringify(a) : a)).join(' ')}`;
+  const start = Date.now();
+
+  const child = spawn(py, args, {
+    cwd: brainCwd,
+    env: childEnv,
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+
+  const stdoutChunks = [];
+  const stderrChunks = [];
+  child.stdout.on('data', (c) => {
+    stdoutChunks.push(c);
+    process.stdout.write(`[brain-p4] ${c.toString('utf8').replace(/\n$/, '').replace(/\n/g, '\n[brain-p4] ')}\n`);
+  });
+  child.stderr.on('data', (c) => {
+    stderrChunks.push(c);
+    process.stderr.write(`[brain-p4-err] ${c.toString('utf8').replace(/\n$/, '').replace(/\n/g, '\n[brain-p4-err] ')}\n`);
+  });
+
+  let timedOut = false;
+  const exitCode = await new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      timedOut = true;
+      try { child.kill('SIGKILL'); } catch (_) {}
+      reject(new Error(`brain CLI timed out after ${P4_BRAIN_TIMEOUT_MS}ms`));
+    }, P4_BRAIN_TIMEOUT_MS);
+
+    child.on('exit', (code) => { clearTimeout(timer); resolve(code); });
+    child.on('error', (err) => { clearTimeout(timer); reject(err); });
+  }).catch((err) => {
+    if (timedOut) return null;
+    throw err;
+  });
+
+  const stdout = Buffer.concat(stdoutChunks).toString('utf8');
+  const stderr = Buffer.concat(stderrChunks).toString('utf8');
+  const durationMs = Date.now() - start;
+
+  const verdict = assertSmokePhase4({ exitCode, stdout, stderr });
+
+  return {
+    exitCode,
+    stdout,
+    stderr,
+    durationMs,
+    command,
+    cwd: brainCwd,
+    ...verdict,
+  };
+}
+
 module.exports = {
+  // Phase-3 exports (unchanged).
   runBrainSmoke,
   assertSmoke,
   parseSummary,
@@ -333,4 +645,13 @@ module.exports = {
   ITERATION_BUDGET,
   ITERATION_CAP,
   BRAIN_TIMEOUT_MS,
+  // Phase-4 exports (additive).
+  runPhase4Smoke,
+  assertSmokePhase4,
+  parseCraftStep,
+  countOakLogs,
+  guideIsPopulated,
+  firstNonStatusTool,
+  P4_ITERATION_BUDGET,
+  P4_BRAIN_TIMEOUT_MS,
 };

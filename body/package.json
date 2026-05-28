@@ -12,6 +12,8 @@
     "test:smoke:keep": "node test/smoke/run.js --keep-world",
     "test:smoke:brain": "node test/smoke/run-with-brain.js",
     "test:smoke:brain:keep": "node test/smoke/run-with-brain.js --keep-world",
+    "test:smoke:brain:phase4": "node test/smoke/run-with-brain-phase4.js",
+    "test:smoke:brain:phase4:keep": "node test/smoke/run-with-brain-phase4.js --keep-world",
     "dev:up": "node test/smoke/dev-up.js",
     "dev:down": "node test/smoke/dev-up.js --down"
   },
